@@ -5,18 +5,45 @@ data and its code. `pdo` opens the file and runs it like a Cloudflare Durable
 Object, on a laptop, a server or anywhere else, and exposes an MCP wrapper so
 an agent can build and change the object without a separate dev environment.
 
-```
-pdo new todo.obj --class Todo          # empty class, or --from <dir> with src/ + migrations/
-pdo mcp todo.obj                       # MCP over stdio: the agent builds it
-pdo run todo.obj --port 8787           # serve HTTP, fire alarms
-pdo call todo.obj stats                # RPC from the shell
-pdo fetch todo.obj /todos              # one request to fetch()
-pdo describe todo.obj                  # tables, code, live check-in, next alarm
-pdo checkins todo.obj --diffs          # code history
-pdo export todo.obj out/ && (cd out && bunx wrangler deploy)
+## Quick start
+
+Build once (V8 comes prebuilt through `deno_core`):
+
+```sh
+cd pdo && cargo build --release
 ```
 
-Build: `cargo build --release` (V8 comes prebuilt through `deno_core`).
+Then start a blank object and open a Claude session hooked to it, with only
+the object's MCP tools attached:
+
+```sh
+P=$PWD/target/release/pdo; D=$(mktemp -d); $P new $D/my.obj --class Obj && cd $D && claude --strict-mcp-config --mcp-config "{\"mcpServers\":{\"pdo\":{\"command\":\"$P\",\"args\":[\"mcp\",\"$D/my.obj\"]}}}"
+```
+
+`pdo new` writes an empty class (`export class Obj extends DurableObject {}`)
+with no tables and no data. Tell Claude what to build; it proposes code and
+migrations, tests them on a preview copy and releases. In a second terminal,
+serve it while you work:
+
+```sh
+$P run $D/my.obj              # http://127.0.0.1:8787, reloads on every release
+$P checkins $D/my.obj --diffs # what the agent changed
+```
+
+## Commands
+
+```
+pdo new my.obj --class Obj             # empty class, or --from <dir> with src/ + migrations/
+pdo mcp my.obj                         # MCP over stdio: the agent builds it
+pdo run my.obj --port 8787             # serve HTTP, fire alarms
+pdo call my.obj <method> '[args]'      # RPC from the shell
+pdo fetch my.obj /path                 # one request to fetch()
+pdo describe my.obj                    # tables, code, live check-in, next alarm
+pdo checkins my.obj --diffs            # code history
+pdo export my.obj out/ && (cd out && bunx wrangler deploy)
+```
+
+`examples/todo` is a finished object to import (`pdo new todo.obj --class Todo --from examples/todo`).
 
 ## The file
 
