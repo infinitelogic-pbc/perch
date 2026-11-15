@@ -405,7 +405,10 @@
       }
       case "fetch": {
         const obj = state.instance;
-        if (typeof obj.fetch !== "function") throw new Error("this class has no fetch() handler");
+        // No fetch() and no static file matched: a plain 404, as the export does.
+        if (typeof obj.fetch !== "function") {
+          return { meta: { status: 404, headers: [["content-type", "text/plain;charset=UTF-8"]] }, body: core.encode("Not found") };
+        }
         const body = ops.op_take_body(id);
         const req = new Request(ev.url, { method: ev.method, headers: ev.headers, body: ev.method === "GET" || ev.method === "HEAD" ? null : body });
         const res = await obj.fetch(req);

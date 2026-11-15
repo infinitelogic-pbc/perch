@@ -21,6 +21,7 @@ Writing the object:
 - Storage: this.ctx.storage.sql.exec(sql, ...bindings) returns a cursor (.toArray(), .one(), .raw(), rowsWritten). this.ctx.storage.get/put/delete/list is the key-value half. ctx.storage.transactionSync(fn) for atomic multi-statement writes. Every event already runs in its own transaction.
 - Schema changes go ONLY in propose_change migrations (ordered, forward-only SQL). Object code cannot CREATE/ALTER/DROP, and cannot touch _obj_* tables.
 - Data tables need a declared PRIMARY KEY; use UUIDv7 TEXT keys (crypto.randomUUID() is v4; build v7 from Date.now() + crypto.getRandomValues) rather than INTEGER/AUTOINCREMENT so copies of the file can merge changesets later.
+- Web pages: files under public/ are static and served before fetch() without waking the object (public/index.html at /, public/about.html at /about, public/docs/index.html at /docs/; /about.html redirects to /about; GET/HEAD only; ETag + 304). Unmatched requests go to fetch(). Binary files (images, fonts) are { "base64": "..." } in propose_change. Templates for dynamic pages can be imported as strings: import page from "./page.html" (also .txt .sql .css .md .svg). The same layout exports to Cloudflare Static Assets unchanged.
 - Available globals: Request, Response, Headers, URL, URLSearchParams, TextEncoder/TextDecoder, crypto.randomUUID/getRandomValues, setTimeout, structuredClone, atob/btoa, console (logs come back in test_call). Not yet: outbound fetch, WebSockets, env bindings, npm imports (relative imports between files in the object work).
 - Keep the class Cloudflare-compatible: the same source deploys unchanged with `pdo export` + wrangler."#;
 
@@ -51,7 +52,7 @@ fn tools_list() -> Value {
         {
             "name": "read_code",
             "title": "Read code",
-            "description": "Source files at a check-in: the live one by default, \"preview\" for the preview head, or a check-in id (prefix of 4+ characters works). Pass path for one file.",
+            "description": "Files at a check-in: the live one by default, \"preview\" for the preview head, or a check-in id (prefix of 4+ characters works). Pass path for one file. Text comes back as strings; binary files as { base64 } when asked for by path, otherwise as a size stub.",
             "inputSchema": { "type": "object", "properties": {
                 "checkin": { "type": "string", "description": "check-in id or prefix, or \"preview\"; default live" },
                 "path": { "type": "string", "description": "one file, e.g. src/index.ts" }
@@ -85,7 +86,11 @@ fn tools_list() -> Value {
             "description": "Code edits plus new migrations, applied to a preview copy of the file (live data included) and built there: the module graph loads and the constructor runs. Repeated proposals stack on the current preview; restart: true starts over from live. Files map path to full new contents (null deletes). Migrations are forward-only SQL, run in order, each with a name.",
             "inputSchema": { "type": "object", "properties": {
                 "message": { "type": "string", "description": "what this change does" },
-                "files": { "type": "object", "additionalProperties": { "type": ["string", "null"] }, "description": "path -> full file contents, or null to delete" },
+                "files": { "type": "object", "additionalProperties": { "anyOf": [
+                    { "type": "string", "description": "text contents" },
+                    { "type": "object", "properties": { "base64": { "type": "string" } }, "required": ["base64"], "description": "binary contents (images, fonts) for public/" },
+                    { "type": "null", "description": "delete the file" }
+                ] }, "description": "path -> full file contents. Code lives under src/; files under public/ are served as-is at the matching URL path." },
                 "migrations": { "type": "array", "items": { "type": "object", "properties": {
                     "name": { "type": "string" }, "sql": { "type": "string" }
                 }, "required": ["name", "sql"] } },

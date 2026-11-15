@@ -57,4 +57,21 @@ await rpc("setRetention", 24 * 60 * 60 * 1000);
 
 r = await fetch(`${base}/todos/${added.id}`, { method: "DELETE" });
 ok(r.status === 204, "DELETE /todos/:id");
+
+// Static files (public/) and a dynamic page from an imported template.
+r = await fetch(`${base}/`);
+ok(r.status === 200 && (r.headers.get("content-type") ?? "").startsWith("text/html") && (await r.text()).includes("<title>To-do</title>"), "GET / serves public/index.html");
+r = await fetch(`${base}/index.html`, { redirect: "manual" });
+ok(r.status === 307 && new URL(r.headers.get("location")!, base).pathname === "/", "/index.html redirects to /");
+r = await fetch(`${base}/app.css`);
+ok(r.status === 200 && (r.headers.get("content-type") ?? "").startsWith("text/css"), "GET /app.css is text/css");
+r = await fetch(`${base}/logo.png`);
+const png = new Uint8Array(await r.arrayBuffer());
+ok(r.status === 200 && r.headers.get("content-type") === "image/png" && png[1] === 0x50 && png[2] === 0x4e && png.length === 100, "GET /logo.png returns the PNG bytes");
+const etag = r.headers.get("etag");
+r = await fetch(`${base}/logo.png`, { headers: { "if-none-match": etag! } });
+ok(etag && r.status === 304, "revalidating with the ETag gets a 304");
+r = await fetch(`${base}/stats`);
+const statsHtml = await r.text();
+ok(r.status === 200 && statsHtml.includes("<td>Total</td>") && !statsHtml.includes("{{"), "GET /stats renders the imported template");
 console.log(`\n${n} calls passed against ${base}`);

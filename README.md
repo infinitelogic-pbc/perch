@@ -92,10 +92,41 @@ process), the next event rebuilds the isolate and reruns the constructor.
 | Startup | `ctx.blockConcurrencyWhile` (awaited before the first event) | yes |
 | Globals | `Request`, `Response`, `Headers`, `URL`, `URLSearchParams`, `TextEncoder/Decoder`, `crypto.randomUUID/getRandomValues`, timers, `structuredClone`, `atob/btoa`, `console` | yes |
 | Modules | TypeScript and JS files inside the object (relative imports), `cloudflare:workers` | yes |
+| Text imports | `import page from "./page.html"` gives the file as a string (`.html` `.txt` `.sql` `.css` `.md` `.svg`) | yes |
+| Static files | everything under `public/`, served before `fetch()` (see below) | yes |
 | WebSockets and hibernation | | later |
 | Bindings (other objects, secrets, outbound fetch) | `fetch` throws for now | later |
 
 Each event has a 30 s wall-clock limit.
+
+## Web pages
+
+Files under `public/` are served as-is at the matching URL path, before
+`fetch()`, and without waking the object: a static file is a lookup in
+`_obj_blobs` with no constructor, no transaction and no changeset. A class
+that fails to load still serves its static files.
+
+The rules are Cloudflare Workers Static Assets' defaults, so a page behaves
+the same under `pdo run` and after `pdo export`:
+
+| Request | Result |
+| --- | --- |
+| `/` | `public/index.html` |
+| `/about` | `public/about.html` |
+| `/about.html` | 307 to `/about` |
+| `/docs` | 307 to `/docs/` (when `public/docs/index.html` exists) |
+| `/docs/` | `public/docs/index.html` |
+| `/docs/index.html` | 307 to `/docs/` |
+| `/css/site.css` | `public/css/site.css` |
+| anything else, or any method but GET/HEAD | `fetch()` (a 404 when the class has none) |
+
+Responses carry a content type by extension, the file's SHA-256 as a strong
+`ETag` (so `If-None-Match` gets a 304), and
+`Cache-Control: public, max-age=0, must-revalidate`. Binary files (images,
+fonts) go through `propose_change` as `{ "base64": "..." }`; files are limited
+to 25 MiB each, Cloudflare's per-asset limit. Dynamic pages render in `fetch()`,
+usually from an imported template (`examples/todo` serves its UI from
+`public/` and renders `/stats` from `src/stats.html`).
 
 ## The MCP wrapper
 
@@ -106,7 +137,7 @@ result carries a short guide to writing an object.
 | Tool | Annotation | Does |
 | --- | --- | --- |
 | `describe_object` | readOnly | name, class, live check-in, tables + columns + row counts, files, next alarm, preview state |
-| `read_code` | readOnly | files at a check-in (live, `preview`, or an id prefix) |
+| `read_code` | readOnly | files at a check-in (live, `preview`, or an id prefix); binary as `{ base64 }` by path |
 | `list_checkins` | readOnly | history with unified diffs and the migrations each check-in added |
 | `query_data` | readOnly | read-only SQL over data tables, live or preview, 500 rows max |
 | `propose_change` | write | code edits + new migrations applied to a preview copy (`todo.obj.preview`, live data included) and built there: modules load and the constructor runs. Proposals stack; `restart: true` starts from live |
@@ -123,17 +154,24 @@ Migrations only go forward; a rollback changes code, never schema.
 generated `pdo/worker.js` and `wrangler.jsonc`. The wrapper class applies the
 object's migrations once per object (tracked in `_pdo_migrations`), forwards
 `fetch` and `alarm` to the original class, and the entry worker gives the same
-HTTP surface as `pdo run` (`POST /.pdo/rpc/<method>`). Moving state in or out
-of Cloudflare is not in v0.
+HTTP surface as `pdo run` (`POST /.pdo/rpc/<method>`). `public/` becomes
+Workers Static Assets (`assets.directory`), so Cloudflare serves those files
+from the edge and only unmatched requests reach the worker and the Durable
+Object; a `rules` entry makes `.css`, `.md` and `.svg` text imports work as they
+do locally. Moving state in or out of Cloudflare is not in v0.
 
 ## Tests
 
 - `bun test/e2e.ts` builds the to-do example entirely through the MCP tools,
   probes the sandbox, serves it, fires the alarm, releases a bad change and
   rolls it back under a running server, checks that a rollback across a
-  breaking migration is refused, and serves a copy of the file (49 checks).
-- `bun test/http-calls.ts <base>` runs the same 11 HTTP calls against any host;
-  it passes against `pdo run` and against the `pdo export` deploy on Cloudflare.
+  breaking migration is refused, serves a copy of the file, and covers static
+  files (every clean-URL case, 304s, HEAD, base64 images, serving while the
+  constructor throws, the export's assets config) (80 checks).
+- `bun test/http-calls.ts <base>` runs the same 17 HTTP calls (API, RPC, alarm,
+  static files, an imported template) against any host; it passes against
+  `pdo run` and against the `pdo export` deploy on Cloudflare.
+- `cargo test` covers the URL-to-file rules.
 
 ## Not yet
 

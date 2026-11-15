@@ -25,6 +25,12 @@ const calls = [
   'constructor is not RPC',
   'alarm fired and removed the done items',
   'DELETE /todos/:id',
+  'GET / serves public/index.html',
+  '/index.html redirects to /',
+  'GET /app.css is text/css',
+  'GET /logo.png returns the PNG bytes',
+  'revalidating with the ETag gets a 304',
+  'GET /stats renders the imported template',
 ];
 ---
 <Base
@@ -174,7 +180,7 @@ const calls = [
         </div>
       </div>
       <details class="calls">
-        <summary>The same 11 HTTP calls pass on <code>pdo run</code> and on Cloudflare</summary>
+        <summary>The same {calls.length} HTTP calls pass on <code>pdo run</code> and on Cloudflare</summary>
         <ol>{calls.map((c) => <li>{c}</li>)}</ol>
       </details>
     </div>

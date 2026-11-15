@@ -1,6 +1,7 @@
 //! pdo: portable durable objects. One SQLite file holds a Durable Object's
 //! code and data; this binary creates, runs and edits them.
 
+mod assets;
 mod engine;
 mod export;
 mod host;
@@ -37,7 +38,7 @@ enum Cmd {
         /// Object name (defaults to the file name)
         #[arg(long)]
         name: Option<String>,
-        /// Directory with src/** and optional migrations/*.sql
+        /// Directory with src/**, optional public/** (static files) and migrations/*.sql
         #[arg(long)]
         from: Option<PathBuf>,
     },
@@ -110,7 +111,7 @@ export class {class} extends DurableObject {{}}
     )
 }
 
-fn read_dir_files(root: &Path, dir: &Path, out: &mut BTreeMap<String, String>) -> Result<()> {
+fn read_dir_files(root: &Path, dir: &Path, out: &mut BTreeMap<String, Vec<u8>>) -> Result<()> {
     for e in std::fs::read_dir(dir)? {
         let e = e?;
         let p = e.path();
@@ -118,7 +119,7 @@ fn read_dir_files(root: &Path, dir: &Path, out: &mut BTreeMap<String, String>) -
             read_dir_files(root, &p, out)?;
         } else {
             let rel = p.strip_prefix(root)?.to_string_lossy().replace('\\', "/");
-            out.insert(rel, std::fs::read_to_string(&p).with_context(|| format!("reading {}", p.display()))?);
+            out.insert(rel, std::fs::read(&p).with_context(|| format!("reading {}", p.display()))?);
         }
     }
     Ok(())
@@ -152,6 +153,10 @@ fn main() -> Result<()> {
                     bail!("{} has no src/ directory", dir.display());
                 }
                 read_dir_files(&dir, &src, &mut files)?;
+                let public = dir.join("public");
+                if public.is_dir() {
+                    read_dir_files(&dir, &public, &mut files)?;
+                }
                 let mdir = dir.join("migrations");
                 if mdir.is_dir() {
                     let mut entries: Vec<_> = std::fs::read_dir(&mdir)?.filter_map(|e| e.ok()).map(|e| e.path()).filter(|p| p.extension().is_some_and(|x| x == "sql")).collect();
@@ -165,7 +170,7 @@ fn main() -> Result<()> {
                 }
                 msg = format!("import from {}", dir.display());
             } else {
-                files.insert("src/index.ts".to_string(), starter(&class));
+                files.insert("src/index.ts".to_string(), starter(&class).into_bytes());
                 msg = "new object".to_string();
             }
             let s = Store::create(&file, &name, &class, &files, &migrations, &msg)?;

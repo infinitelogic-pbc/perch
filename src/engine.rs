@@ -3,7 +3,7 @@
 
 use std::borrow::Cow;
 use std::cell::RefCell;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::rc::Rc;
 use std::task::Poll;
 use std::time::Duration;
@@ -21,7 +21,10 @@ use rusqlite::types::{Value as SqlValue, ValueRef};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::store::{Mode, ModeCell, now_ms};
+use crate::store::{Files, Mode, ModeCell, now_ms};
+
+/// Imported as a string (default export), as wrangler does for its Text rules.
+pub const TEXT_MODULE_EXTS: &[&str] = &["html", "txt", "sql", "css", "md", "svg"];
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct LogLine {
@@ -496,12 +499,12 @@ pub fn transpile(path: &str, code: &str) -> Result<(String, Option<Vec<u8>>)> {
 }
 
 struct ObjectLoader {
-    files: BTreeMap<String, String>,
+    files: Files,
     source_maps: RefCell<HashMap<String, Vec<u8>>>,
 }
 
 impl ObjectLoader {
-    fn find(&self, path: &str) -> Option<(String, &String)> {
+    fn find(&self, path: &str) -> Option<(String, &Vec<u8>)> {
         let candidates = [
             path.to_string(),
             format!("{path}.ts"),
@@ -540,9 +543,18 @@ impl ModuleLoader for ObjectLoader {
                 CLOUDFLARE_WORKERS.to_string()
             } else {
                 let path = spec.path().trim_start_matches('/');
-                let (found, src) = self
+                let (found, bytes) = self
                     .find(path)
                     .ok_or_else(|| JsErrorBox::generic(format!("module not found in object: {path}")))?;
+                let src = &String::from_utf8(bytes.clone())
+                    .map_err(|_| JsErrorBox::generic(format!("{found} is not UTF-8 text, so it cannot be imported")))?;
+                // Text modules: the file's contents as the default export, the way
+                // wrangler treats .html/.txt/.sql (pdo export adds rules for the rest).
+                let ext = found.rsplit_once('.').map(|(_, e)| e).unwrap_or("");
+                if TEXT_MODULE_EXTS.contains(&ext) {
+                    let code = format!("export default {};\n", serde_json::to_string(src).unwrap());
+                    return Ok(ModuleSource::new(ModuleType::JavaScript, ModuleSourceCode::String(code.into()), spec, None));
+                }
                 if found.ends_with(".json") {
                     return Ok(ModuleSource::new(
                         ModuleType::Json,
@@ -589,7 +601,7 @@ impl Engine {
     pub async fn load(
         conn: Rc<Connection>,
         mode: ModeCell,
-        files: BTreeMap<String, String>,
+        files: Files,
         main: &str,
         echo_logs: bool,
     ) -> Result<Engine> {

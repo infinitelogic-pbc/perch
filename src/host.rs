@@ -13,7 +13,8 @@ use serde_json::{Value, json};
 use tokio::sync::{mpsc, oneshot};
 
 use crate::engine::{Dispatched, Engine, LogLine};
-use crate::store::{DEFAULT_MAIN, Mode, Store, now_ms};
+use crate::assets::{self, Resolved};
+use crate::store::{DEFAULT_MAIN, Mode, PUBLIC_DIR, Store, now_ms};
 
 pub enum Event {
     Fetch {
@@ -38,7 +39,7 @@ pub struct TableChanges {
     pub deletes: u64,
 }
 
-#[derive(Serialize, Debug)]
+#[derive(Serialize, Debug, Default)]
 pub struct Outcome {
     pub ok: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -59,6 +60,9 @@ pub struct Outcome {
     /// The handler called setAlarm/deleteAlarm, so the runtime leaves the alarm alone.
     #[serde(skip)]
     pub alarm_touched: bool,
+    /// The static file that answered, when one did.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub asset: Option<String>,
 }
 
 pub struct Host {
@@ -192,7 +196,64 @@ impl Host {
         }
     }
 
+    /// Serve a GET/HEAD from `public/` if a file matches. Never touches the
+    /// engine: no constructor, no transaction, no changeset.
+    fn try_asset(&self, method: &str, url: &str, headers: &[(String, String)]) -> Result<Option<Outcome>> {
+        if method != "GET" && method != "HEAD" {
+            return Ok(None);
+        }
+        let Ok(u) = url::Url::parse(url) else { return Ok(None) };
+        if u.path().starts_with("/.pdo/") {
+            return Ok(None);
+        }
+        let (checkin, manifest) = self.store.live_manifest()?;
+        if !manifest.keys().any(|k| k.starts_with(PUBLIC_DIR)) {
+            return Ok(None);
+        }
+        let path = assets::decode_path(u.path());
+        let base = Outcome { ok: true, checkin, ..Default::default() };
+        match assets::resolve(&manifest, &path) {
+            Resolved::Miss => Ok(None),
+            Resolved::Redirect(to) => {
+                let loc = match u.query() { Some(q) => format!("{to}?{q}"), None => to };
+                Ok(Some(Outcome {
+                    status: Some(307),
+                    headers: vec![("location".into(), loc)],
+                    asset: Some(path),
+                    ..base
+                }))
+            }
+            Resolved::File(file) => {
+                let hash = manifest[&file].clone();
+                let etag = format!("\"{hash}\"");
+                let mut h = vec![
+                    ("content-type".to_string(), assets::content_type(&file).to_string()),
+                    ("etag".to_string(), etag.clone()),
+                    ("cache-control".to_string(), assets::CACHE_CONTROL.to_string()),
+                ];
+                let inm = headers.iter().find(|(k, _)| k.eq_ignore_ascii_case("if-none-match")).map(|(_, v)| v.as_str());
+                if inm.is_some_and(|v| v.split(',').any(|t| t.trim().trim_start_matches("W/") == etag || t.trim() == "*")) {
+                    return Ok(Some(Outcome { status: Some(304), headers: h, asset: Some(file), ..base }));
+                }
+                let body = self.store.blob(&hash)?;
+                h.push(("content-length".into(), body.len().to_string()));
+                Ok(Some(Outcome {
+                    status: Some(200),
+                    headers: h,
+                    body: if method == "HEAD" { vec![] } else { body },
+                    asset: Some(file),
+                    ..base
+                }))
+            }
+        }
+    }
+
     pub async fn event(&mut self, ev: Event) -> Result<Outcome> {
+        if let Event::Fetch { method, url, headers, .. } = &ev {
+            if let Some(o) = self.try_asset(method, url, headers)? {
+                return Ok(o);
+            }
+        }
         self.ensure().await?;
         let checkin = self.loaded.clone().unwrap_or_default();
         let (label, json, body) = match ev {
@@ -239,6 +300,7 @@ impl Host {
                     checkin,
                     alarm_missing: d.meta.get("missing").and_then(|m| m.as_bool()).unwrap_or(false),
                     alarm_touched,
+                    asset: None,
                 }
             }
             Err(e) => Outcome {
@@ -253,6 +315,7 @@ impl Host {
                 checkin,
                 alarm_missing: false,
                 alarm_touched,
+                asset: None,
             },
         })
     }
@@ -280,6 +343,7 @@ impl Host {
                 checkin: String::new(),
                 alarm_missing: false,
                 alarm_touched: false,
+                asset: None,
             },
         };
         // If the handler rescheduled or deleted the alarm itself, leave it.
@@ -334,9 +398,10 @@ pub fn spawn(path: PathBuf, fire_alarms: bool, echo_logs: bool) -> Result<HostHa
                     return;
                 }
             };
+            // A class that fails to load is reported, not fatal: static files
+            // still serve, and each fetch/RPC retries the load and returns the error.
             if let Err(e) = host.ensure().await {
-                let _ = ready_tx.send(Err(e));
-                return;
+                eprintln!("pdo: warning: the object's code did not load: {e:#}");
             }
             let _ = ready_tx.send(Ok(()));
             loop {

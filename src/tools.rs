@@ -11,7 +11,7 @@ use serde_json::{Value, json};
 
 use crate::engine::exec_sql;
 use crate::host::{Event, Host, Outcome};
-use crate::store::{Migration, Mode, Store, now_ms, schema_fits};
+use crate::store::{Files, Migration, Mode, PUBLIC_DIR, Store, now_ms, schema_fits};
 
 pub struct Tools {
     pub path: PathBuf,
@@ -21,14 +21,42 @@ pub struct Tools {
 
 #[derive(Deserialize, Default)]
 pub struct ProposeArgs {
-    /// path -> new contents, or null to delete the file
+    /// path -> new contents (text, or { base64 } for binary), or null to delete the file
     #[serde(default)]
-    pub files: BTreeMap<String, Option<String>>,
+    pub files: BTreeMap<String, Option<FileValue>>,
     #[serde(default)]
     pub migrations: Vec<Migration>,
     pub message: String,
     #[serde(default)]
     pub restart: bool,
+}
+
+#[derive(Deserialize, Clone)]
+#[serde(untagged)]
+pub enum FileValue {
+    Text(String),
+    Binary { base64: String },
+}
+
+impl FileValue {
+    pub fn bytes(&self) -> Result<Vec<u8>> {
+        use base64::Engine;
+        match self {
+            FileValue::Text(s) => Ok(s.clone().into_bytes()),
+            FileValue::Binary { base64 } => base64::engine::general_purpose::STANDARD
+                .decode(base64.trim())
+                .map_err(|e| anyhow!("invalid base64: {e}")),
+        }
+    }
+}
+
+fn file_json(bytes: &[u8], full: bool) -> Value {
+    use base64::Engine;
+    match std::str::from_utf8(bytes) {
+        Ok(s) => Value::String(s.to_string()),
+        Err(_) if full => json!({ "base64": base64::engine::general_purpose::STANDARD.encode(bytes) }),
+        Err(_) => json!({ "binary": true, "bytes": bytes.len(), "sha256": crate::store::sha256_hex(bytes) }),
+    }
 }
 
 #[derive(Deserialize, Default, Clone)]
@@ -83,7 +111,7 @@ fn iso(ms: i64) -> String {
 fn commit_checkin(
     store: &Store,
     parent: Option<&str>,
-    files: &BTreeMap<String, String>,
+    files: &Files,
     migrations: &[Migration],
     message: &str,
 ) -> Result<(String, Vec<String>)> {
@@ -238,7 +266,8 @@ impl Tools {
             "live_checkin": { "id": ck.id, "message": ck.message, "at": iso(ck.created_at) },
             "tables": tables,
             "kv_keys": kv_keys,
-            "files": files,
+            "files": files.iter().filter(|f| !f["path"].as_str().unwrap_or("").starts_with(PUBLIC_DIR)).collect::<Vec<_>>(),
+            "public": files.iter().filter(|f| f["path"].as_str().unwrap_or("").starts_with(PUBLIC_DIR)).collect::<Vec<_>>(),
             "migrations_applied": s.migrations()?.len(),
             "next_alarm": alarm_json(alarm),
             "recorded_changesets": changes,
@@ -267,14 +296,16 @@ impl Tools {
                 (id.clone(), s.files_at(&id)?)
             }
         };
-        let files: BTreeMap<String, String> = match path {
+        // Text comes back as a string. Binary comes back as { base64 } when asked
+        // for by path, and as a stub in the full listing so it stays small.
+        let out: BTreeMap<String, Value> = match path {
             Some(p) => {
                 let c = files.get(p).ok_or_else(|| anyhow!("no file {p} at check-in {}", &id[..12]))?;
-                BTreeMap::from([(p.to_string(), c.clone())])
+                BTreeMap::from([(p.to_string(), file_json(c, true))])
             }
-            None => files,
+            None => files.iter().map(|(p, c)| (p.clone(), file_json(c, false))).collect(),
         };
-        Ok(json!({ "checkin": id, "files": files }))
+        Ok(json!({ "checkin": id, "files": out }))
     }
 
     pub fn list_checkins(&self, limit: usize, diffs: bool) -> Result<Value> {
@@ -307,11 +338,20 @@ impl Tools {
                 let mut d = String::new();
                 let paths: std::collections::BTreeSet<&String> = parent_files.keys().chain(files.keys()).collect();
                 for p in paths {
-                    let a = parent_files.get(p).map(|s| s.as_str()).unwrap_or("");
-                    let b = files.get(p).map(|s| s.as_str()).unwrap_or("");
-                    if a == b {
+                    let (ab, bb) = (parent_files.get(p), files.get(p));
+                    if ab == bb {
                         continue;
                     }
+                    let (a, b) = match (
+                        ab.map(|x| std::str::from_utf8(x)).transpose(),
+                        bb.map(|x| std::str::from_utf8(x)).transpose(),
+                    ) {
+                        (Ok(a), Ok(b)) => (a.unwrap_or(""), b.unwrap_or("")),
+                        _ => {
+                            d.push_str(&format!("Binary file {p} differs\n"));
+                            continue;
+                        }
+                    };
                     let diff = similar::TextDiff::from_lines(a, b);
                     let from = if parent_files.contains_key(p) { format!("a/{p}") } else { "/dev/null".into() };
                     let to = if files.contains_key(p) { format!("b/{p}") } else { "/dev/null".into() };
@@ -367,11 +407,12 @@ impl Tools {
         let mut changed = vec![];
         for (path, content) in &a.files {
             match content {
-                Some(c) => {
-                    if files.get(path) != Some(c) {
+                Some(v) => {
+                    let c = v.bytes().map_err(|e| anyhow!("{path}: {e}"))?;
+                    if files.get(path) != Some(&c) {
                         changed.push(path.clone());
                     }
-                    files.insert(path.clone(), c.clone());
+                    files.insert(path.clone(), c);
                 }
                 None => {
                     if files.remove(path).is_some() {

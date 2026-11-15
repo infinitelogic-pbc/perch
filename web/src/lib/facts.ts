@@ -71,7 +71,7 @@ export interface Tool {
 
 export const TOOLS: Tool[] = [
   { name: 'describe_object', kind: 'read', does: 'Name, class, live check-in, tables with columns and row counts, files, next alarm, preview state. Start here.' },
-  { name: 'read_code', kind: 'read', does: 'Source at the live check-in, the preview, or any check-in id (a 4+ character prefix works).' },
+  { name: 'read_code', kind: 'read', does: 'Files at the live check-in, the preview, or any check-in id (a 4+ character prefix works). Binary files come back as base64.' },
   { name: 'list_checkins', kind: 'read', does: 'History, newest first, with unified diffs and the migrations each check-in added.' },
   { name: 'query_data', kind: 'read', does: 'Read-only SQL over the object’s own tables, live or preview. At most 500 rows.' },
   { name: 'propose_change', kind: 'write', does: 'Code edits plus new migrations, applied to a preview copy of the file (live data included) and built there. Proposals stack; restart starts over from live.' },
@@ -87,7 +87,7 @@ export interface Command {
 }
 
 export const COMMANDS: Command[] = [
-  { usage: 'pdo new <file> [--class C] [--name N] [--from DIR]', does: 'Create an object file: an empty class, or src/** and migrations/*.sql from a directory.' },
+  { usage: 'pdo new <file> [--class C] [--name N] [--from DIR]', does: 'Create an object file: an empty class, or src/**, public/** and migrations/*.sql from a directory.' },
   { usage: 'pdo run <file> [--port 8787] [--host 127.0.0.1] [--no-alarms]', does: 'Serve it over HTTP and fire its alarms.' },
   { usage: 'pdo mcp <file>', does: 'The MCP server, over stdio.' },
   { usage: 'pdo describe <file>', does: 'The description as JSON.' },
@@ -99,7 +99,8 @@ export const COMMANDS: Command[] = [
 
 /** What the runtime gives object code today. */
 export const RUNTIME: { api: string; note: string }[] = [
-  { api: 'fetch(request)', note: 'every HTTP request to pdo run' },
+  { api: 'public/', note: 'static files served before fetch() without waking the object (Cloudflare Static Assets rules)' },
+  { api: 'fetch(request)', note: 'every other HTTP request; import page from "./page.html" for templates' },
   { api: 'public methods', note: 'RPC, also POST /.pdo/rpc/<method> with a JSON array of args' },
   { api: 'ctx.storage.sql.exec', note: 'cursor with toArray, one, raw, rowsWritten' },
   { api: 'ctx.storage.get / put / delete / list', note: 'the KV half' },

@@ -46,7 +46,17 @@ ${RUNTIME.map((r) => `- ${r.api}: ${r.note}`).join('\n')}
 
 ## HTTP surface (pdo run, and the pdo export worker)
 
-- Every request goes to the class's fetch().
+- GET/HEAD requests that match a file under \`public/\` are served as-is, before
+  fetch() and without waking the object, with Cloudflare Static Assets'
+  defaults: \`/\` is public/index.html, \`/about\` is public/about.html,
+  \`/about.html\` 307s to \`/about\`, \`/docs/\` is public/docs/index.html and
+  \`/docs\` 307s to it. Strong ETag (the file's SHA-256), 304 on If-None-Match,
+  \`Cache-Control: public, max-age=0, must-revalidate\`. On export, public/
+  becomes \`assets.directory\`.
+- Every other request goes to the class's fetch() (a 404 if it has none).
+- Templates import as strings: \`import page from "./page.html"\` (also .txt,
+  .sql, .css, .md, .svg). Binary files go through propose_change as
+  \`{ "base64": "..." }\`; 25 MiB per file.
 - \`POST /.pdo/rpc/<method>\` with a JSON array body calls a public method and
   returns \`{"result": ...}\`. constructor, fetch, alarm, ctx, env and
   names starting with \`_\` are not RPC.

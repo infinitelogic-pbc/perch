@@ -1,5 +1,6 @@
 import { DurableObject } from "cloudflare:workers";
 import { uuidv7 } from "./uuid";
+import statsPage from "./stats.html";
 
 type TodoRow = { id: string; title: string; done: number; created_at: number; done_at: number | null };
 
@@ -17,6 +18,18 @@ export class Todo extends DurableObject {
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
     const parts = url.pathname.split("/").filter(Boolean);
+    // The UI is static (public/); this page is dynamic, from an imported template.
+    if (url.pathname === "/stats" && request.method === "GET") {
+      const s = await this.stats();
+      const vars: Record<string, string> = {
+        total: String(s.total),
+        open: String(s.open),
+        done: String(s.done),
+        lastCleanup: s.lastCleanup ? new Date(s.lastCleanup).toISOString() : "never",
+      };
+      const html = statsPage.replace(/\{\{(\w+)\}\}/g, (_: string, k: string) => vars[k] ?? "");
+      return new Response(html, { headers: { "content-type": "text/html; charset=utf-8" } });
+    }
     if (parts[0] !== "todos") return Response.json({ error: "not found" }, { status: 404 });
     const id = parts[1];
 

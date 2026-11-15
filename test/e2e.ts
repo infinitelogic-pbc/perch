@@ -73,7 +73,7 @@ ok(ann.describe_object.readOnlyHint && ann.query_data.readOnlyHint && ann.releas
 
 let r = await mcp.tool("propose_change", {
   message: "to-do API with nightly cleanup",
-  files: { "src/index.ts": src("src/index.ts"), "src/uuid.ts": src("src/uuid.ts") },
+  files: { "src/index.ts": src("src/index.ts"), "src/uuid.ts": src("src/uuid.ts"), "src/stats.html": src("src/stats.html") },
   migrations: [{ name: "0001_todos", sql: src("migrations/0001_todos.sql") }],
 });
 ok(!r.isError && r.v.build.ok, `propose_change builds on the preview (${r.v.checkin?.slice(0, 12)})`);
@@ -131,7 +131,7 @@ ok(r.isError && r.text.includes("AUTOINCREMENT"), "AUTOINCREMENT is refused");
 r = await mcp.tool("propose_change", {
   restart: true,
   message: "to-do API with nightly cleanup",
-  files: { "src/index.ts": src("src/index.ts"), "src/uuid.ts": src("src/uuid.ts") },
+  files: { "src/index.ts": src("src/index.ts"), "src/uuid.ts": src("src/uuid.ts"), "src/stats.html": src("src/stats.html") },
   migrations: [{ name: "0001_todos", sql: src("migrations/0001_todos.sql") }],
 });
 ok(r.v.build.ok && !r.v.stacked_on_previous_preview, "restart starts from live");
@@ -227,6 +227,108 @@ run.kill();
 
 const changes = sh(["checkins", file, "--limit", "100"]);
 ok(changes.total === 4, `history kept (${changes.total} check-ins)`);
+
+// ------------------------------------------------------------------ static files and text imports
+const site = join(dir, "site.obj");
+sh(["new", site, "--class", "Site"]);
+const m2 = new Mcp(site);
+await m2.rpc("initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "e2e", version: "0" } });
+const PNG = readFileSync(join(ROOT, "examples/todo/public/logo.png"));
+r = await m2.tool("propose_change", {
+  message: "a site whose constructor throws",
+  files: {
+    "src/index.ts": `import { DurableObject } from "cloudflare:workers";
+import page from "./hello.html";
+export class Site extends DurableObject {
+  constructor(ctx: any, env: any) { super(ctx, env); if (!(globalThis as any).ALLOW) throw new Error("boom in constructor"); }
+  async fetch() { return new Response(page, { headers: { "content-type": "text/html" } }); }
+}`,
+    "src/hello.html": "<h1>dynamic</h1>",
+    "public/index.html": "<h1>home</h1>",
+    "public/about.html": "<h1>about</h1>",
+    "public/docs/index.html": "<h1>docs</h1>",
+    "public/logo.png": { base64: PNG.toString("base64") },
+  },
+});
+ok(!r.v.build.ok && r.v.build.error.includes("boom in constructor"), "a throwing constructor fails the build");
+const get = (path: string, extra: any = {}) => m2.tool("test_call", { kind: "fetch", path, ...extra });
+r = await get("/");
+ok(r.v.status === 200 && r.v.body === "<h1>home</h1>" && r.v.asset === "public/index.html", "/ serves public/index.html without waking the broken object");
+ok(Object.keys(r.v.changes).length === 0 && r.v.logs.length === 0, "a static file runs no event (no changes, no logs)");
+const cases: [string, number, string][] = [
+  ["/index.html", 307, "/"],
+  ["/about", 200, "<h1>about</h1>"],
+  ["/about.html", 307, "/about"],
+  ["/about/", 307, "/about"],
+  ["/docs", 307, "/docs/"],
+  ["/docs/", 200, "<h1>docs</h1>"],
+  ["/docs/index.html", 307, "/docs/"],
+  ["/about.html?x=1", 307, "/about?x=1"],
+];
+for (const [path, status, want] of cases) {
+  r = await get(path);
+  const got = status === 307 ? r.v.headers.find((h: string[]) => h[0] === "location")?.[1] : r.v.body;
+  ok(r.v.status === status && got === want, `${path} → ${status} ${want}`);
+}
+r = await get("/logo.png");
+ok(r.v.status === 200 && r.v.headers.some((h: string[]) => h[0] === "content-type" && h[1] === "image/png"), "binary file served as image/png");
+const etag = r.v.headers.find((h: string[]) => h[0] === "etag")[1];
+r = await get("/logo.png", { headers: { "if-none-match": etag } });
+ok(r.v.status === 304, "If-None-Match gets a 304");
+r = await get("/logo.png", { http_method: "HEAD" });
+ok(r.v.status === 200 && r.v.body === "", "HEAD returns headers only");
+r = await get("/about", { http_method: "POST", body: "x" });
+ok(!r.v.ok && /boom in constructor/.test(r.text), "non-GET methods go to fetch() (and hit the broken constructor)");
+r = await get("/missing");
+ok(/boom in constructor/.test(r.text), "a miss goes to fetch()");
+
+r = await m2.tool("propose_change", {
+  message: "fix the constructor",
+  files: { "src/index.ts": `import { DurableObject } from "cloudflare:workers";
+import page from "./hello.html";
+export class Site extends DurableObject {
+  async fetch() { return new Response(page, { headers: { "content-type": "text/html" } }); }
+}` },
+});
+ok(r.v.build.ok, "fixed constructor builds");
+r = await get("/missing");
+ok(r.v.status === 200 && r.v.body === "<h1>dynamic</h1>" && !r.v.asset, "fetch() renders an imported .html template");
+r = await m2.tool("read_code", { checkin: "preview", path: "public/logo.png" });
+ok(Buffer.from(r.v.files["public/logo.png"].base64, "base64").equals(PNG), "read_code returns binary as base64, byte-identical");
+r = await m2.tool("read_code", { checkin: "preview" });
+ok(r.v.files["public/logo.png"].binary && r.v.files["public/index.html"] === "<h1>home</h1>", "full listing stubs binary, inlines text");
+r = await m2.tool("release_change", {});
+ok(!r.isError, "release the site");
+r = await m2.tool("describe_object");
+ok(r.v.public.length === 4 && r.v.files.every((f: any) => f.path.startsWith("src/")), "describe_object lists static files separately");
+r = await m2.tool("list_checkins");
+ok(r.v.checkins[0].diff.includes("Binary file public/logo.png differs"), "diffs mark binary files");
+r = await m2.tool("call_object", { kind: "fetch", path: "/docs/" });
+ok(r.v.body === "<h1>docs</h1>", "static files on live through call_object");
+m2.close();
+
+// pdo run: a class with no fetch() still serves its files, and 404s the rest.
+const bare = join(dir, "bare.obj");
+const seed = mkdtempSync(join(tmpdir(), "pdo-seed-"));
+Bun.write(join(seed, "src/index.ts"), `import { DurableObject } from "cloudflare:workers";\nexport class Bare extends DurableObject {}\n`);
+Bun.write(join(seed, "public/index.html"), "<h1>bare</h1>");
+await Bun.sleep(50);
+sh(["new", bare, "--class", "Bare", "--from", seed]);
+const port3 = port + 2;
+run = await serve(bare, port3);
+res = await fetch(`http://127.0.0.1:${port3}/`);
+ok(res.status === 200 && (await res.text()) === "<h1>bare</h1>", "pdo run serves public/ from --from imports");
+res = await fetch(`http://127.0.0.1:${port3}/nothing`);
+ok(res.status === 404, "no fetch() and no file is a 404");
+run.kill();
+
+// Export: public/ becomes Workers Static Assets, bytes unchanged.
+const out = join(dir, "site-export");
+sh(["export", site, out]);
+const wr = JSON.parse(readFileSync(join(out, "wrangler.jsonc"), "utf8").replace(/^\/\/.*\n/, ""));
+ok(wr.assets?.directory === "./public", "export maps public/ to assets.directory");
+ok(readFileSync(join(out, "public/logo.png")).equals(PNG) && readFileSync(join(out, "src/hello.html"), "utf8") === "<h1>dynamic</h1>", "export writes binary and text files unchanged");
+ok(wr.rules?.[0]?.globs?.includes("**/*.css"), "export adds text-import rules for .css/.md/.svg");
 
 console.log(`\n${passed} checks passed (${dir})`);
 process.exit(0);

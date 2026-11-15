@@ -173,6 +173,11 @@ CREATE TABLE _obj_changes (
 "#;
 
 pub type Manifest = BTreeMap<String, String>;
+/// Path -> file contents.
+pub type Files = BTreeMap<String, Vec<u8>>;
+pub const MAX_FILE_BYTES: usize = 25 * 1024 * 1024;
+/// Files under this prefix are served as-is at the matching URL path.
+pub const PUBLIC_DIR: &str = "public/";
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Checkin {
@@ -256,7 +261,7 @@ impl Store {
         path: &Path,
         name: &str,
         class: &str,
-        files: &BTreeMap<String, String>,
+        files: &Files,
         migrations: &[Migration],
         message: &str,
     ) -> Result<Store> {
@@ -359,11 +364,14 @@ impl Store {
         .ok_or_else(|| anyhow!("missing blob {hash}"))
     }
 
-    pub fn put_files(&self, files: &BTreeMap<String, String>) -> Result<Manifest> {
+    pub fn put_files(&self, files: &Files) -> Result<Manifest> {
         let mut m = Manifest::new();
         for (path, content) in files {
             validate_path(path)?;
-            m.insert(path.clone(), self.put_blob(content.as_bytes())?);
+            if content.len() > MAX_FILE_BYTES {
+                bail!("{path} is {} bytes; files are limited to 25 MiB (Cloudflare's per-asset limit)", content.len());
+            }
+            m.insert(path.clone(), self.put_blob(content)?);
         }
         Ok(m)
     }
@@ -440,15 +448,21 @@ impl Store {
         self.meta_req("live_checkin")
     }
 
-    /// Source files at a check-in, as text.
-    pub fn files_at(&self, checkin: &str) -> Result<BTreeMap<String, String>> {
+    /// Every file at a check-in, as bytes (code is UTF-8; `public/` may be binary).
+    pub fn files_at(&self, checkin: &str) -> Result<Files> {
         let ck = self.checkin(checkin)?;
         let mut out = BTreeMap::new();
         for (path, hash) in ck.manifest {
-            let bytes = self.blob(&hash)?;
-            out.insert(path, String::from_utf8(bytes).context("source file is not UTF-8")?);
+            out.insert(path, self.blob(&hash)?);
         }
         Ok(out)
+    }
+
+    /// The live check-in's manifest (path -> blob hash).
+    pub fn live_manifest(&self) -> Result<(String, Manifest)> {
+        let id = self.live_checkin()?;
+        let ck = self.checkin(&id)?;
+        Ok((id, ck.manifest))
     }
 
     pub fn migrations(&self) -> Result<Vec<(i64, String, String, String, i64)>> {
