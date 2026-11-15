@@ -1,0 +1,16 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "pdo-web",
+  "compatibility_date": "2026-07-01",
+  // Assets only: the site is Astro's static `dist/`. pdo itself is a local
+  // binary; this origin serves the explanation and /llms.txt.
+  "assets": {
+    "directory": "dist",
+    "not_found_handling": "404-page",
+    "html_handling": "auto-trailing-slash"
+  },
+  "routes": [
+    { "pattern": "pdo.__BASE_DOMAIN__", "custom_domain": true }
+  ],
+  "observability": { "enabled": true }
+}

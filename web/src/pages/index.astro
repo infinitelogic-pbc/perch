@@ -1,0 +1,403 @@
+---
+import Base from '../layouts/Base.astro';
+import { RESERVED, TOOLS, RUNTIME, REFUSED, NOT_YET } from '../lib/facts';
+
+const escape = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;');
+const HEADER ='53 51 4c 69 74 65 20 66 6f 72 6d 61 74 20 33 00';
+
+const loop = [
+  { tool: 'describe_object', note: 'what is here' },
+  { tool: 'read_code', note: 'what runs' },
+  { tool: 'propose_change', note: 'code + migrations, on a preview copy' },
+  { tool: 'test_call', note: 'try it, see the rows it touched' },
+  { tool: 'release_change', note: 'one transaction, live moves' },
+];
+
+const calls = [
+  'RPC stats',
+  'POST /todos returns a UUIDv7 row',
+  'POST without a title is a 400',
+  'PATCH marks done',
+  'GET ?done=1 lists it',
+  'unknown path is a 404',
+  'RPC add',
+  'RPC stats sees both',
+  'constructor is not RPC',
+  'alarm fired and removed the done items',
+  'DELETE /todos/:id',
+];
+---
+<Base
+  title="pdo: portable durable objects"
+  description="A portable durable object is one SQLite file holding a Cloudflare-style Durable Object's code and data. Run it locally, edit it over MCP, export it to Cloudflare unchanged."
+>
+  <div class="wrap hero split">
+    <div class="stack-lg hero-copy">
+      <p class="eyebrow">Portable Durable Objects</p>
+      <h1>The object<br />is a file.</h1>
+      <p class="lede">
+        A portable durable object is one SQLite file holding a Cloudflare-style Durable Object’s
+        data <em>and</em> its code. Copy the file and you have copied the object: its code history,
+        its schema, its next alarm, its rows.
+      </p>
+      <p class="ctas">
+        <a class="btn" href="#start">Quick start</a>
+        <a class="btn ghost" href="/format">Read the format</a>
+      </p>
+    </div>
+
+    <figure class="file" aria-label="Tables inside todo.obj">
+      <div class="file-head">
+        <span class="mono fname">todo.obj</span>
+        <span class="mono hex" title="The first 16 bytes of every SQLite database: SQLite format 3">{HEADER}</span>
+      </div>
+      <ul class="plain rows">
+        {RESERVED.map((t) => (
+          <li class="row hatch">
+            <code>{t.name}</code>
+            <span>{t.holds}</span>
+          </li>
+        ))}
+        <li class="fence mono" aria-label="Boundary enforced by the SQLite authorizer">
+          <span>object code stops here</span>
+        </li>
+        <li class="row data">
+          <code>todos</code>
+          <span>id, title, done, created_at, done_at</span>
+        </li>
+        <li class="row data idx">
+          <code>todos_done</code>
+          <span>index (done, done_at)</span>
+        </li>
+      </ul>
+      <figcaption class="small">
+        The to-do example after its first migration. Amber is the runtime’s half; green is yours,
+        reached through <code>ctx.storage.sql</code>.
+      </figcaption>
+    </figure>
+  </div>
+
+  <section id="runtime">
+    <div class="wrap split">
+      <div class="stack">
+        <p class="eyebrow">The runtime</p>
+        <h2>Open the file, run the class.</h2>
+        <p>
+          The <code>pdo</code> binary loads the live check-in’s code into V8 and runs it single-threaded,
+          one event per SQLite transaction. Every write is recorded as a session changeset in the
+          same transaction. The class is an ordinary Durable Object: it extends
+          <code>DurableObject</code> from <code>cloudflare:workers</code>.
+        </p>
+        <p>
+          A SQLite authorizer draws the line. Object code reads and writes its own tables and nothing
+          else: no <code>_obj_</code> tables, no DDL, no transactions, no ATTACH, no pragmas that change
+          anything. Schema changes arrive only as migrations.
+        </p>
+      </div>
+      <div class="stack">
+        <table class="api">
+          <caption class="small">What object code gets today</caption>
+          <tbody>
+            {RUNTIME.map((r) => (
+              <tr><th scope="row"><code>{r.api}</code></th><td>{r.note}</td></tr>
+            ))}
+          </tbody>
+        </table>
+        <div class="refused">
+          <p class="small">Refused when object code tries them, from the end-to-end test:</p>
+          <pre set:html={REFUSED.map((q) => `<span class="x">✕</span> ${escape(q)}`).join('\n')} />
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="mcp">
+    <div class="wrap stack-lg">
+      <div class="stack">
+        <p class="eyebrow">The MCP loop</p>
+        <h2>Agents build objects through nine tools.</h2>
+        <p class="lede">
+          <code>pdo mcp todo.obj</code> speaks MCP over stdio. An agent changes the object on a
+          preview copy of the file, live data included, tries it there, then releases. The
+          end-to-end test builds the to-do example this way, starting from an empty starter.
+        </p>
+      </div>
+      <ol class="loop plain">
+        {loop.map((s, i) => (
+          <li>
+            <span class="n mono">{i + 1}</span>
+            <code>{s.tool}</code>
+            <span class="small">{s.note}</span>
+          </li>
+        ))}
+      </ol>
+      <p class="rollback">
+        <code>rollback_code</code> moves the live check-in back. It moves code only, and it refuses
+        when the old code no longer fits the schema (say, a column it reads was renamed).
+      </p>
+      <div class="tools">
+        {TOOLS.map((t) => (
+          <div class="tool">
+            <div class="tool-head"><code>{t.name}</code><span class={`tag ${t.kind}`}>{t.kind}</span></div>
+            <p class="small">{t.does}</p>
+          </div>
+        ))}
+      </div>
+    </div>
+  </section>
+
+  <section id="carry">
+    <div class="wrap stack-lg">
+      <div class="stack">
+        <p class="eyebrow">Carry it</p>
+        <h2>Two ways out.</h2>
+      </div>
+      <div class="two">
+        <div class="stack card">
+          <h3>Copy the file</h3>
+          <p>
+            Each event folds the WAL back into the main file after it commits, so a plain copy is
+            the whole object. Run the copy anywhere and it serves the same check-in and the same rows.
+          </p>
+          <pre><span class="p">$ </span>cp todo.obj ~/elsewhere/
+<span class="p">$ </span>pdo run ~/elsewhere/todo.obj</pre>
+        </div>
+        <div class="stack card">
+          <h3>Export to Cloudflare</h3>
+          <p>
+            <code>pdo export</code> writes a Wrangler project. The class source is copied byte for
+            byte; a generated wrapper applies the migrations once and gives the same HTTP surface as
+            <code>pdo run</code>, including <code>POST /.pdo/rpc/&lt;method&gt;</code>.
+          </p>
+          <pre><span class="p">$ </span>pdo export todo.obj out/
+<span class="p">$ </span>cd out && bunx wrangler deploy</pre>
+        </div>
+      </div>
+      <details class="calls">
+        <summary>The same 11 HTTP calls pass on <code>pdo run</code> and on Cloudflare</summary>
+        <ol>{calls.map((c) => <li>{c}</li>)}</ol>
+      </details>
+    </div>
+  </section>
+
+  <section id="start">
+    <div class="wrap split">
+      <div class="stack">
+        <p class="eyebrow">Quick start</p>
+        <h2>From a checkout.</h2>
+        <p>
+          pdo is a single Rust binary. Build it, make an object, serve it, then hand the same file to
+          your agent.
+        </p>
+        <p class="small">
+          Every command is listed in <a href="/llms.txt">/llms.txt</a>, along with the file format
+          and the tool schemas, for agents.
+        </p>
+      </div>
+      <pre><span class="c"># build</span>
+<span class="p">$ </span>cd pdo && cargo build --release
+<span class="p">$ </span>export PATH="$PWD/target/release:$PATH"
+
+<span class="c"># a starter object that counts hits in KV</span>
+<span class="p">$ </span>pdo new hello.obj
+<span class="p">$ </span>pdo run hello.obj
+<span class="p">$ </span>curl localhost:8787/
+
+<span class="c"># or import a directory with src/ and migrations/</span>
+<span class="p">$ </span>pdo new todo.obj --from examples/todo
+<span class="p">$ </span>pdo call todo.obj add '["buy milk"]'
+<span class="p">$ </span>pdo fetch todo.obj /todos
+
+<span class="c"># give it to an agent (Claude Code shown)</span>
+<span class="p">$ </span>claude mcp add todo -- pdo mcp todo.obj
+
+<span class="c"># look inside</span>
+<span class="p">$ </span>pdo describe todo.obj
+<span class="p">$ </span>pdo checkins todo.obj --diffs</pre>
+    </div>
+  </section>
+
+  <section id="limits">
+    <div class="wrap split">
+      <div class="stack">
+        <p class="eyebrow">v0</p>
+        <h2>Not yet.</h2>
+        <p>
+          One object per file, one file per process, run locally. These are out of scope for v0:
+        </p>
+      </div>
+      <div class="stack">
+        <ul class="nope">{NOT_YET.map((n) => <li>{n}</li>)}</ul>
+        <p class="small">
+          Related work: celld, and <a href="https://rivet.dev">Rivet Actors</a>.
+        </p>
+      </div>
+    </div>
+  </section>
+</Base>
+
+<style>
+  .hero {
+    padding-top: clamp(2.5rem, 7vw, 5.5rem);
+    padding-bottom: clamp(3rem, 7vw, 5.5rem);
+    align-items: center;
+  }
+  h1 {
+    font-family: var(--mono);
+    font-size: clamp(2.6rem, 1.6rem + 5vw, 5rem);
+    font-weight: 700;
+    letter-spacing: -0.045em;
+    line-height: 0.98;
+  }
+  .ctas { display: flex; flex-wrap: wrap; gap: 0.75rem; }
+  .btn {
+    display: inline-block;
+    font-family: var(--mono);
+    font-size: 0.88rem;
+    text-decoration: none;
+    padding: 0.6rem 1rem;
+    border-radius: 6px;
+    background: var(--ink);
+    color: var(--page);
+    border: 1px solid var(--ink);
+  }
+  .btn:hover { color: var(--page); background: var(--green); border-color: var(--green); }
+  .btn.ghost { background: transparent; color: var(--ink); }
+  .btn.ghost:hover { color: var(--green); border-color: var(--green); background: transparent; }
+
+  /* the file */
+  .file {
+    margin: 0;
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    box-shadow: 0 1px 0 var(--line), 0 18px 40px -24px #0004;
+    overflow: hidden;
+  }
+  .file-head {
+    padding: 0.85rem 1rem 0.7rem;
+    border-bottom: 1px solid var(--line);
+    display: flex;
+    flex-direction: column;
+    gap: 0.2rem;
+  }
+  .fname { font-weight: 700; font-size: 1rem; }
+  .hex {
+    font-size: 0.68rem;
+    color: var(--ink-2);
+    letter-spacing: 0.04em;
+    overflow-wrap: anywhere;
+  }
+  .rows { font-size: 0.85rem; }
+  .row {
+    display: grid;
+    grid-template-columns: minmax(8.5rem, auto) minmax(0, 1fr);
+    gap: 0.25rem 1rem;
+    padding: 0.42rem 1rem;
+    border-bottom: 1px solid var(--line);
+    align-items: baseline;
+  }
+  .row code { background: none; padding: 0; font-weight: 600; }
+  .row.hatch code { color: var(--amber); }
+  .row span { color: var(--ink-2); font-size: 0.82rem; }
+  .row.data { background: var(--green-soft); border-left: 3px solid var(--green); }
+  .row.data code { color: var(--green); }
+  .row.idx code { font-weight: 400; }
+  .fence {
+    position: relative;
+    text-align: center;
+    font-size: 0.68rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--amber);
+    padding: 0.55rem 1rem;
+    border-bottom: 2px dashed var(--amber);
+  }
+  .file figcaption { padding: 0.7rem 1rem 0.9rem; }
+  @media (max-width: 420px) {
+    .row { grid-template-columns: minmax(0, 1fr); }
+  }
+
+  /* runtime */
+  .api { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
+  .api caption { text-align: left; padding-bottom: 0.5rem; }
+  .api th, .api td {
+    text-align: left;
+    vertical-align: top;
+    padding: 0.55rem 0;
+    border-top: 1px solid var(--line);
+  }
+  .api th { font-weight: 400; padding-right: 1rem; width: 52%; }
+  .api th code { background: none; padding: 0; color: var(--green); overflow-wrap: anywhere; }
+  .api td { color: var(--ink-2); }
+  .refused pre { margin-top: 0.5rem; font-size: 0.8rem; }
+  .x { color: var(--amber); }
+
+  /* mcp loop */
+  .loop {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 0.5rem;
+    counter-reset: none;
+  }
+  @media (min-width: 860px) {
+    .loop { grid-template-columns: repeat(5, minmax(0, 1fr)); }
+  }
+  .loop li {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    gap: 0.2rem;
+    padding: 0.85rem 1rem;
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+  }
+  .loop li code { background: none; padding: 0; font-weight: 600; overflow-wrap: anywhere; }
+  .loop li:last-child { border-color: var(--amber); }
+  .n { font-size: 0.7rem; color: var(--ink-2); }
+  .rollback { max-width: 44rem; }
+  .tools {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 1px;
+    background: var(--line);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    overflow: hidden;
+  }
+  @media (min-width: 640px) { .tools { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+  @media (min-width: 980px) { .tools { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+  .tool { background: var(--card); padding: 0.9rem 1rem; }
+  .tool-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: 0.5rem;
+    margin-bottom: 0.35rem;
+  }
+  .tool-head code { background: none; padding: 0; font-weight: 600; overflow-wrap: anywhere; }
+
+  /* carry */
+  .two {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 1rem;
+  }
+  @media (min-width: 760px) { .two { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+  .card {
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 1.2rem;
+  }
+  .card pre { background: var(--page); font-size: 0.82rem; }
+  .calls summary { cursor: pointer; font-weight: 600; }
+  .calls ol { margin: 0.8rem 0 0; padding-left: 1.6rem; font-family: var(--mono); font-size: 0.85rem; color: var(--ink-2); columns: 2 18rem; }
+
+  #start pre { font-size: 0.85rem; }
+
+  .nope { margin: 0; padding-left: 1.2rem; }
+  .nope li + li { margin-top: 0.35rem; }
+  .nope li::marker { color: var(--amber); }
+</style>

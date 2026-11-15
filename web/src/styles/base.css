@@ -1,0 +1,151 @@
+/* pdo
+ *
+ * The page is drawn like the file it describes: a SQLite database seen from
+ * the inside. Reserved _obj_ tables are hatched in amber (the runtime's
+ * half, object code cannot reach it), data tables are solid green (the
+ * object's half). Everything else is ink on page.
+ *
+ * System fonts only: nothing is fetched from anywhere but this origin.
+ */
+
+:root {
+  --page: #f3f1ec;
+  --page-2: #e9e6df;
+  --card: #fbfaf7;
+  --ink: #17191c;
+  --ink-2: #5a5f66;
+  --line: #d3cfc6;
+  --amber: #a35a12;
+  --amber-soft: #a35a1214;
+  --green: #1d6b4f;
+  --green-soft: #1d6b4f17;
+
+  --mono: ui-monospace, 'SF Mono', SFMono-Regular, 'JetBrains Mono', Menlo, Consolas, monospace;
+  --sans: system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+
+  --wrap: 68rem;
+  --gutter: clamp(16px, 4vw, 40px);
+  color-scheme: light;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --page: #121315;
+    --page-2: #1a1c1f;
+    --card: #17191b;
+    --ink: #e8e6e1;
+    --ink-2: #9a9ea4;
+    --line: #2d3034;
+    --amber: #e09a4f;
+    --amber-soft: #e09a4f1a;
+    --green: #5fc39a;
+    --green-soft: #5fc39a1a;
+    color-scheme: dark;
+  }
+}
+
+*, *::before, *::after { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+
+body {
+  margin: 0;
+  background: var(--page);
+  color: var(--ink);
+  font-family: var(--sans);
+  font-size: clamp(1rem, 0.96rem + 0.2vw, 1.08rem);
+  line-height: 1.6;
+  overflow-x: hidden;
+}
+
+.wrap {
+  max-width: var(--wrap);
+  margin: 0 auto;
+  padding: 0 var(--gutter);
+}
+
+a { color: inherit; text-decoration-color: var(--green); text-underline-offset: 3px; text-decoration-thickness: 2px; }
+a:hover { color: var(--green); }
+
+code, pre, kbd, .mono { font-family: var(--mono); font-size: 0.88em; }
+:not(pre) > code {
+  background: var(--page-2);
+  padding: 0.08em 0.35em;
+  border-radius: 3px;
+  overflow-wrap: anywhere;
+}
+
+pre {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 1rem 1.1rem;
+  overflow-x: auto;
+  line-height: 1.55;
+  margin: 0;
+}
+pre .c { color: var(--ink-2); }
+pre .p { color: var(--green); user-select: none; }
+
+h1, h2, h3 { line-height: 1.12; letter-spacing: -0.02em; margin: 0; }
+h2 {
+  font-size: clamp(1.5rem, 1.2rem + 1.4vw, 2.2rem);
+  font-weight: 650;
+}
+h3 { font-size: 1.05rem; font-weight: 650; }
+p { margin: 0; }
+.lede { font-size: 1.12em; color: var(--ink-2); max-width: 40rem; }
+
+.eyebrow {
+  font-family: var(--mono);
+  font-size: 0.75rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ink-2);
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+}
+.eyebrow::before {
+  content: '';
+  width: 1.4rem;
+  height: 2px;
+  background: currentColor;
+}
+
+section { padding: clamp(3rem, 7vw, 5.5rem) 0; border-top: 1px solid var(--line); }
+.stack > * + * { margin-top: 1rem; }
+.stack-lg > * + * { margin-top: 1.75rem; }
+
+.split {
+  display: grid;
+  gap: clamp(1.5rem, 4vw, 3.5rem);
+  grid-template-columns: minmax(0, 1fr);
+}
+@media (min-width: 860px) {
+  .split { grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.1fr); align-items: start; }
+}
+
+/* Hatched = reserved. Used for _obj_ rows everywhere. */
+.hatch {
+  background-image: repeating-linear-gradient(
+    -45deg,
+    var(--amber-soft) 0 6px,
+    transparent 6px 12px
+  );
+}
+.tag {
+  display: inline-block;
+  font-family: var(--mono);
+  font-size: 0.7rem;
+  padding: 0.05rem 0.4rem;
+  border-radius: 3px;
+  border: 1px solid currentColor;
+  white-space: nowrap;
+}
+.tag.read { color: var(--green); }
+.tag.write { color: var(--ink-2); }
+.tag.destructive { color: var(--amber); }
+
+.plain { list-style: none; padding: 0; margin: 0; }
+
+.small { font-size: 0.85rem; color: var(--ink-2); }

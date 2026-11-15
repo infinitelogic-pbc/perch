@@ -1,0 +1,137 @@
+---
+import Base from '../layouts/Base.astro';
+import { RESERVED } from '../lib/facts';
+---
+<Base
+  title="The format: pdo"
+  description="Inside a portable durable object file: the reserved _obj_ tables that hold code, history, migrations, KV, the alarm and changesets, and the data tables that belong to the object."
+>
+  <div class="wrap head stack">
+    <p class="eyebrow">Format version 1 · api pdo-v0</p>
+    <h1>Inside a <code>.obj</code> file.</h1>
+    <p class="lede">
+      An object file is an ordinary SQLite database. Open it with <code>sqlite3</code> and you can
+      read all of it. Seven tables whose names start with <code>_obj_</code> belong to the runtime.
+      Every other table belongs to the object.
+    </p>
+  </div>
+
+  <section>
+    <div class="wrap stack-lg">
+      <div class="stack">
+        <h2>The runtime’s half</h2>
+        <p>
+          Object code cannot read or write these. The runtime and the MCP tools can. Migrations
+          cannot touch them either.
+        </p>
+      </div>
+      <ol class="plain tables">
+        {RESERVED.map((t) => (
+          <li class="t hatch">
+            <div class="t-head">
+              <code class="name">{t.name}</code>
+              <code class="cols">({t.columns})</code>
+            </div>
+            <p>{t.detail}</p>
+          </li>
+        ))}
+      </ol>
+    </div>
+  </section>
+
+  <section>
+    <div class="wrap split">
+      <div class="stack">
+        <h2>The object’s half</h2>
+        <p>
+          Data tables are created by migrations and nothing else. Object code reaches them through
+          <code>ctx.storage.sql.exec</code>; agents read them with <code>query_data</code>.
+        </p>
+      </div>
+      <div class="stack rules">
+        <p><strong>A declared PRIMARY KEY on every table.</strong> A migration that creates one without is refused.</p>
+        <p><strong>No AUTOINCREMENT.</strong> Use UUIDv7 text keys, so copies of a file can merge changesets later. The to-do example ships a 14-line <code>uuidv7()</code>.</p>
+        <p><strong>Forward only.</strong> Migrations run in order, are recorded with the check-in that brought them, and are never undone.</p>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="wrap split">
+      <div class="stack">
+        <h2>Code and history</h2>
+        <p>
+          A check-in is a manifest from path to blob hash, a parent, a message and a time. Its id is
+          the SHA-256 of those. <code>_obj_meta.live_checkin</code> names the one that runs.
+        </p>
+        <p>
+          Releasing writes one squashed check-in, runs its migrations and moves
+          <code>live_checkin</code>, all in one transaction. Rolling back moves
+          <code>live_checkin</code> to an older check-in after comparing the schema it was released
+          against with the tables as they are now.
+        </p>
+      </div>
+      <pre><span class="c">-- what runs</span>
+SELECT value FROM _obj_meta WHERE key = 'live_checkin';
+
+<span class="c">-- its files</span>
+SELECT manifest FROM _obj_checkins WHERE id = :live;
+<span class="c">-- {"{"}"src/index.ts":"9f2c…","src/uuid.ts":"41ab…"{"}"}</span>
+
+SELECT data FROM _obj_blobs WHERE hash = '9f2c…';</pre>
+    </div>
+  </section>
+
+  <section>
+    <div class="wrap split">
+      <div class="stack">
+        <h2>The preview copy</h2>
+        <p>
+          <code>propose_change</code> copies the live file to <code>&lt;file&gt;.preview</code>, data
+          included, and applies the change there. <code>test_call</code> and
+          <code>query_data</code> with <code>target: "preview"</code> work on that copy.
+          <code>release_change</code> replays the migrations on the live file, and is refused if
+          live moved since the preview was made.
+        </p>
+      </div>
+      <div class="stack">
+        <h2>Writes leave a trail</h2>
+        <p>
+          Each event is one SQLite transaction with a session attached. When it writes, its
+          changeset goes into <code>_obj_changes</code> before commit, labelled with the event kind
+          (fetch, rpc, alarm) and the check-in that ran.
+        </p>
+      </div>
+    </div>
+  </section>
+</Base>
+
+<style>
+  .head { padding-top: clamp(2.5rem, 6vw, 4.5rem); padding-bottom: clamp(2.5rem, 6vw, 4rem); }
+  h1 {
+    font-size: clamp(2.2rem, 1.4rem + 4vw, 4rem);
+    font-weight: 700;
+    letter-spacing: -0.04em;
+  }
+  h1 code { font-size: 0.9em; background: none; padding: 0; color: var(--amber); }
+  .tables {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 0.6rem;
+  }
+  @media (min-width: 820px) { .tables { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+  .t {
+    border: 1px solid var(--line);
+    border-left: 3px solid var(--amber);
+    border-radius: 6px;
+    padding: 0.9rem 1rem;
+    background-color: var(--card);
+  }
+  .t-head { display: flex; flex-wrap: wrap; gap: 0.2rem 0.6rem; align-items: baseline; margin-bottom: 0.4rem; }
+  .t-head code { background: none; padding: 0; }
+  .name { color: var(--amber); font-weight: 700; }
+  .cols { color: var(--ink-2); font-size: 0.78rem; overflow-wrap: anywhere; }
+  .t p { font-size: 0.92rem; }
+  .rules p { padding-left: 1rem; border-left: 3px solid var(--green); }
+  pre { font-size: 0.82rem; }
+</style>
