@@ -1,0 +1,11 @@
+target/
+*.obj
+*.obj-wal
+*.obj-shm
+*.obj-journal
+*.preview
+*.preview-wal
+*.preview-shm
+node_modules/
+.wrangler/
+dist/
