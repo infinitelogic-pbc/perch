@@ -28,7 +28,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Create a new object file (a starter class, or code from a directory)
+    /// Create a new object file (an empty class, or code from a directory)
     New {
         file: PathBuf,
         /// Class name exported by src/index.ts
@@ -105,14 +105,7 @@ fn starter(class: &str) -> String {
     format!(
         r#"import {{ DurableObject }} from "cloudflare:workers";
 
-export class {class} extends DurableObject {{
-  async fetch(request: Request): Promise<Response> {{
-    const url = new URL(request.url);
-    const hits = ((await this.ctx.storage.get<number>("hits")) ?? 0) + 1;
-    await this.ctx.storage.put("hits", hits);
-    return Response.json({{ object: this.ctx.id.name, path: url.pathname, hits }});
-  }}
-}}
+export class {class} extends DurableObject {{}}
 "#
     )
 }

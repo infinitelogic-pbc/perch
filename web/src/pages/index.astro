@@ -119,7 +119,7 @@ const calls = [
         <p class="lede">
           <code>pdo mcp todo.obj</code> speaks MCP over stdio. An agent changes the object on a
           preview copy of the file, live data included, tries it there, then releases. The
-          end-to-end test builds the to-do example this way, starting from an empty starter.
+          end-to-end test builds the to-do example this way, starting from an empty class.
         </p>
       </div>
       <ol class="loop plain">
@@ -198,10 +198,10 @@ const calls = [
 <span class="p">$ </span>cd pdo && cargo build --release
 <span class="p">$ </span>export PATH="$PWD/target/release:$PATH"
 
-<span class="c"># a starter object that counts hits in KV</span>
+<span class="c"># a blank object, shaped by an agent over MCP</span>
 <span class="p">$ </span>pdo new hello.obj
+<span class="p">$ </span>claude mcp add hello -- pdo mcp hello.obj
 <span class="p">$ </span>pdo run hello.obj
-<span class="p">$ </span>curl localhost:8787/
 
 <span class="c"># or import a directory with src/ and migrations/</span>
 <span class="p">$ </span>pdo new todo.obj --from examples/todo

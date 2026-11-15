@@ -6,7 +6,7 @@ Object, on a laptop, a server or anywhere else, and exposes an MCP wrapper so
 an agent can build and change the object without a separate dev environment.
 
 ```
-pdo new todo.obj --class Todo          # starter class, or --from <dir> with src/ + migrations/
+pdo new todo.obj --class Todo          # empty class, or --from <dir> with src/ + migrations/
 pdo mcp todo.obj                       # MCP over stdio: the agent builds it
 pdo run todo.obj --port 8787           # serve HTTP, fire alarms
 pdo call todo.obj stats                # RPC from the shell

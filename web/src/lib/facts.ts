@@ -87,7 +87,7 @@ export interface Command {
 }
 
 export const COMMANDS: Command[] = [
-  { usage: 'pdo new <file> [--class C] [--name N] [--from DIR]', does: 'Create an object file: a starter class, or src/** and migrations/*.sql from a directory.' },
+  { usage: 'pdo new <file> [--class C] [--name N] [--from DIR]', does: 'Create an object file: an empty class, or src/** and migrations/*.sql from a directory.' },
   { usage: 'pdo run <file> [--port 8787] [--host 127.0.0.1] [--no-alarms]', does: 'Serve it over HTTP and fire its alarms.' },
   { usage: 'pdo mcp <file>', does: 'The MCP server, over stdio.' },
   { usage: 'pdo describe <file>', does: 'The description as JSON.' },
