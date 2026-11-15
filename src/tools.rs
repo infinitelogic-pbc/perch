@@ -114,6 +114,7 @@ fn commit_checkin(
     match r {
         Ok(v) => {
             store.with_mode(Mode::Privileged, |c| c.execute_batch("COMMIT"))?;
+            let _ = store.with_mode(Mode::Privileged, |c| c.execute_batch("PRAGMA wal_checkpoint(PASSIVE)"));
             Ok(v)
         }
         Err(e) => {
@@ -121,6 +122,11 @@ fn commit_checkin(
             Err(e)
         }
     }
+}
+
+fn alarm_json(a: Option<(i64, i64)>) -> Value {
+    a.map(|(at, retry)| json!({ "at": iso(at), "at_ms": at, "retry_count": retry }))
+        .unwrap_or(Value::Null)
 }
 
 pub fn outcome_json(o: &Outcome) -> Value {
@@ -182,8 +188,14 @@ impl Tools {
         }))
     }
 
-    pub fn describe(&self) -> Result<Value> {
-        let s = self.store()?;
+    pub fn describe(&self, target: Option<&str>) -> Result<Value> {
+        let is_preview = target == Some("preview");
+        let s = if is_preview {
+            self.preview_store()?
+                .ok_or_else(|| anyhow!("there is no preview copy; propose_change creates one"))?
+        } else {
+            self.store()?
+        };
         let live = s.live_checkin()?;
         let ck = s.checkin(&live)?;
         let schema = s.schema()?;
@@ -213,23 +225,28 @@ impl Tools {
         let changes: i64 = s.with_mode(Mode::Privileged, |c| {
             c.query_row("SELECT count(*) FROM _obj_changes", [], |r| r.get(0))
         })?;
-        let file_bytes = std::fs::metadata(&self.path).map(|m| m.len()).unwrap_or(0);
+        let file_bytes = std::fs::metadata(&s.path).map(|m| m.len()).unwrap_or(0);
         Ok(json!({
             "name": s.meta_req("name")?,
             "class": s.meta_req("class")?,
             "main": s.meta("main")?,
             "format_version": s.meta("format_version")?,
             "api_version": s.meta("api_version")?,
-            "file": self.path.display().to_string(),
+            "target": if is_preview { "preview" } else { "live" },
+            "file": s.path.display().to_string(),
             "file_bytes": file_bytes,
             "live_checkin": { "id": ck.id, "message": ck.message, "at": iso(ck.created_at) },
             "tables": tables,
             "kv_keys": kv_keys,
             "files": files,
             "migrations_applied": s.migrations()?.len(),
-            "next_alarm": alarm.map(|(at, retry)| json!({ "at": iso(at), "at_ms": at, "retry_count": retry })),
+            "next_alarm": alarm_json(alarm),
             "recorded_changesets": changes,
-            "preview": self.preview_state(&live)?,
+            "preview": if is_preview {
+                json!({ "base": s.meta("preview_base")?, "built": s.meta("preview_built")?.as_deref() == Some(live.as_str()) })
+            } else {
+                self.preview_state(&live)?
+            },
         }))
     }
 
@@ -446,10 +463,12 @@ impl Tools {
         let o = h.event(ev).await?;
         let mut v = outcome_json(&o);
         v["target"] = json!("preview");
-        if c.kind == "alarm" {
-            // An alarm run by hand clears the pending alarm, as a fired one would.
+        if c.kind == "alarm" && (o.ok || o.alarm_missing) && !o.alarm_touched {
+            // An alarm run by hand clears the pending alarm the way a fired one
+            // does: only if the handler did not set or delete it itself.
             h.store.with_mode(Mode::Privileged, |c| c.execute("DELETE FROM _obj_alarms", []))?;
         }
+        v["next_alarm"] = alarm_json(h.store.alarm()?);
         Ok(v)
     }
 
@@ -462,6 +481,7 @@ impl Tools {
         let o = self.live.as_mut().unwrap().event(ev).await?;
         let mut v = outcome_json(&o);
         v["target"] = json!("live");
+        v["next_alarm"] = alarm_json(self.live.as_ref().unwrap().store.alarm()?);
         Ok(v)
     }
 

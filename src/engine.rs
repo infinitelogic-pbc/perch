@@ -36,6 +36,8 @@ pub struct EngineState {
     pub results: HashMap<u32, std::result::Result<(Value, Vec<u8>), String>>,
     pub bodies: HashMap<u32, Vec<u8>>,
     pub savepoint: u32,
+    /// Did this event call setAlarm or deleteAlarm?
+    pub alarm_touched: bool,
     /// Echo log lines to stderr as they happen (pdo run).
     pub echo_logs: bool,
 }
@@ -291,6 +293,7 @@ fn op_alarm_get(state: &mut OpState) -> Result<f64, JsErrorBox> {
 
 #[op2(fast)]
 fn op_alarm_set(state: &mut OpState, at: f64) -> Result<(), JsErrorBox> {
+    st(state).alarm_touched = true;
     let at = at as i64;
     privileged(state, |c| {
         c.execute(
@@ -304,6 +307,7 @@ fn op_alarm_set(state: &mut OpState, at: f64) -> Result<(), JsErrorBox> {
 
 #[op2(fast)]
 fn op_alarm_delete(state: &mut OpState) -> Result<(), JsErrorBox> {
+    st(state).alarm_touched = true;
     privileged(state, |c| c.execute("DELETE FROM _obj_alarms", []))?;
     Ok(())
 }
@@ -608,6 +612,7 @@ impl Engine {
             results: HashMap::new(),
             bodies: HashMap::new(),
             savepoint: 0,
+            alarm_touched: false,
             echo_logs,
         });
         rt.execute_script("pdo:bootstrap.js", include_str!("../js/bootstrap.js"))
@@ -631,6 +636,10 @@ impl Engine {
         Ok(Engine { rt, next_id: 1 })
     }
 
+    pub fn alarm_touched(&mut self) -> bool {
+        self.rt.op_state().borrow_mut().borrow_mut::<EngineState>().alarm_touched
+    }
+
     pub fn take_logs(&mut self) -> Vec<LogLine> {
         std::mem::take(&mut self.rt.op_state().borrow_mut().borrow_mut::<EngineState>().logs)
     }
@@ -646,6 +655,7 @@ impl Engine {
             let mut s = state.borrow_mut();
             let es = s.borrow_mut::<EngineState>();
             es.savepoint = 0;
+            es.alarm_touched = false;
             if let Some(b) = body {
                 es.bodies.insert(id, b);
             }

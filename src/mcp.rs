@@ -42,8 +42,10 @@ fn tools_list() -> Value {
         {
             "name": "describe_object",
             "title": "Describe object",
-            "description": "Name, class, live check-in, data tables with columns and row counts, code file list, next alarm and preview state. Start here.",
-            "inputSchema": { "type": "object", "properties": {} },
+            "description": "Name, class, live check-in, data tables with columns and row counts, code file list, next alarm and preview state. Start here. target \"preview\" describes the preview copy (its schema, data counts and alarm).",
+            "inputSchema": { "type": "object", "properties": {
+                "target": { "type": "string", "enum": ["live", "preview"], "default": "live" }
+            } },
             "annotations": { "title": "Describe object", "readOnlyHint": true, "idempotentHint": true, "openWorldHint": false }
         },
         {
@@ -94,7 +96,7 @@ fn tools_list() -> Value {
         {
             "name": "test_call",
             "title": "Test call (preview)",
-            "description": "Call fetch, an RPC method or the alarm on the preview copy and return the result, console logs and the rows each table gained, changed or lost. Writes land in the preview only.",
+            "description": "Call fetch, an RPC method or the alarm on the preview copy and return the result, console logs, the rows each table gained, changed or lost, and the preview's next alarm afterwards. Writes land in the preview only. An alarm run here clears the pending alarm unless the handler rescheduled it.",
             "inputSchema": call_schema.clone(),
             "annotations": { "title": "Test call (preview)", "readOnlyHint": false, "destructiveHint": false, "idempotentHint": false, "openWorldHint": false }
         },
@@ -129,7 +131,7 @@ fn tools_list() -> Value {
 async fn call_tool(tools: &mut Tools, name: &str, args: Value) -> Result<Value> {
     let s = |k: &str| args.get(k).and_then(|v| v.as_str()).map(|s| s.to_string());
     match name {
-        "describe_object" => tools.describe(),
+        "describe_object" => tools.describe(s("target").as_deref()),
         "read_code" => tools.read_code(s("checkin").as_deref(), s("path").as_deref()),
         "list_checkins" => tools.list_checkins(
             args.get("limit").and_then(|v| v.as_u64()).unwrap_or(20) as usize,

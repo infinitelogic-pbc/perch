@@ -56,6 +56,9 @@ pub struct Outcome {
     pub checkin: String,
     #[serde(skip)]
     pub alarm_missing: bool,
+    /// The handler called setAlarm/deleteAlarm, so the runtime leaves the alarm alone.
+    #[serde(skip)]
+    pub alarm_touched: bool,
 }
 
 pub struct Host {
@@ -175,6 +178,8 @@ impl Host {
         match result {
             Ok(v) => {
                 conn.execute_batch("COMMIT")?;
+                // Fold the WAL into the main file so a plain copy of the .obj is complete.
+                let _ = conn.execute_batch("PRAGMA wal_checkpoint(PASSIVE)");
                 Ok(v)
             }
             Err(e) => {
@@ -213,6 +218,7 @@ impl Host {
             logs.extend(e.take_logs());
         }
         let changes = summarize_changeset(&cs);
+        let alarm_touched = self.engine.as_mut().map(|e| e.alarm_touched()).unwrap_or(false);
         Ok(match r {
             Ok(d) => {
                 let status = d.meta.get("status").and_then(|s| s.as_u64()).map(|s| s as u16);
@@ -232,6 +238,7 @@ impl Host {
                     changes,
                     checkin,
                     alarm_missing: d.meta.get("missing").and_then(|m| m.as_bool()).unwrap_or(false),
+                    alarm_touched,
                 }
             }
             Err(e) => Outcome {
@@ -245,6 +252,7 @@ impl Host {
                 changes,
                 checkin,
                 alarm_missing: false,
+                alarm_touched,
             },
         })
     }
@@ -271,11 +279,12 @@ impl Host {
                 changes: BTreeMap::new(),
                 checkin: String::new(),
                 alarm_missing: false,
+                alarm_touched: false,
             },
         };
         // If the handler rescheduled or deleted the alarm itself, leave it.
         if let Some((at2, _)) = self.store.alarm()? {
-            if at2 == at {
+            if !out.alarm_touched && at2 == at {
                 self.store.with_mode(Mode::Privileged, |c| {
                     if out.ok || out.alarm_missing || retry >= 6 {
                         c.execute("DELETE FROM _obj_alarms WHERE id=1 AND scheduled_at=?", [at])

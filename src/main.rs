@@ -192,7 +192,7 @@ fn main() -> Result<()> {
             rt.block_on(server::serve(h, addr))?;
         }
         Cmd::Mcp { file } => local(mcp::serve(file))?,
-        Cmd::Describe { file } => print(&Tools::new(file)?.describe()?),
+        Cmd::Describe { file } => print(&Tools::new(file)?.describe(None)?),
         Cmd::Checkins { file, limit, diffs } => print(&Tools::new(file)?.list_checkins(limit, diffs)?),
         Cmd::Call { file, method, args } => local(async move {
             let args: Value = serde_json::from_str(&args).context("args must be a JSON array")?;

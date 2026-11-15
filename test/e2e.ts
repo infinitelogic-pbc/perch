@@ -88,6 +88,10 @@ r = await mcp.tool("query_data", { sql: "SELECT count(*) AS n FROM todos" });
 ok(r.isError && r.text.includes("no such table"), "live is untouched: the migration only ran on the preview");
 r = await mcp.tool("query_data", { sql: "SELECT count(*) AS n FROM todos", target: "preview" });
 ok(r.v.rows[0][0] === 1, "query_data can read the preview");
+r = await mcp.tool("describe_object", { target: "preview" });
+ok(r.v.target === "preview" && r.v.next_alarm && r.v.tables.some((t: any) => t.name === "todos" && t.rows === 1), "describe_object can describe the preview, alarm included");
+r = await mcp.tool("test_call", { kind: "alarm" });
+ok(r.v.ok && r.v.next_alarm && r.v.next_alarm.at_ms > Date.now() + 60_000, "a hand-run alarm that reschedules itself keeps its next alarm");
 
 // ------------------------------------------------------------------ the sandbox
 r = await mcp.tool("propose_change", {
@@ -211,10 +215,8 @@ mcp.close();
 // ------------------------------------------------------------------ carry the file
 const dir2 = mkdtempSync(join(tmpdir(), "pdo-carry-"));
 const file2 = join(dir2, "todo.obj");
-// Make sure the WAL is folded in so a plain copy carries everything.
-sh(["describe", file]);
+// Only the .obj file travels: every commit checkpoints the WAL into it.
 copyFileSync(file, file2);
-for (const ext of ["-wal", "-shm"]) if (existsSync(file + ext)) copyFileSync(file + ext, file2 + ext);
 const port2 = port + 1;
 run = await serve(file2, port2);
 const listed = await (await fetch(`http://127.0.0.1:${port2}/todos`)).json();
