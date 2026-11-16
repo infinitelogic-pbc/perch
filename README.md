@@ -13,22 +13,29 @@ Build once (V8 comes prebuilt through `deno_core`):
 cd pdo && cargo build --release
 ```
 
-Then start a blank object and open a Claude session hooked to it, with only
-the object's MCP tools attached:
+Then point `bin/pdo-claude` at an object file. It opens a Claude session in a
+fresh, empty temp directory with only that object's MCP tools attached, and
+creates the object first if the file does not exist:
 
 ```sh
-P=$PWD/target/release/pdo; D=$(mktemp -d); $P new $D/my.obj --class Obj && cd $D && claude --strict-mcp-config --mcp-config "{\"mcpServers\":{\"pdo\":{\"command\":\"$P\",\"args\":[\"mcp\",\"$D/my.obj\"]}}}"
+bin/pdo-claude ~/objects/my.obj                 # new or existing object
+bin/pdo-claude ~/objects/shop.obj --class Shop  # class name for a new one
+bin/pdo-claude my.obj -- --model sonnet "build a guestbook"   # args after -- go to claude
 ```
 
-`pdo new` writes an empty class (`export class Obj extends DurableObject {}`)
-with no tables and no data. Tell Claude what to build; it proposes code and
-migrations, tests them on a preview copy and releases. In a second terminal,
-serve it while you work:
+A new object is an empty class (`export class My extends DurableObject {}`)
+with no tables and no data. Tell Claude what to build; it proposes code,
+tests and migrations, tries them on a preview copy and releases. In a second
+terminal, serve it while you work:
 
 ```sh
-$P run $D/my.obj              # http://127.0.0.1:8787, reloads on every release
-$P checkins $D/my.obj --diffs # what the agent changed
+target/release/pdo run ~/objects/my.obj              # http://127.0.0.1:8787, reloads on every release
+target/release/pdo checkins ~/objects/my.obj --diffs # what the agent changed
 ```
+
+The helper finds the binary at `$PDO`, then this checkout's
+`target/release/pdo`, then `pdo` on `PATH`, and removes the temp directory
+when Claude exits. The object file stays where you put it.
 
 ## Commands
 
