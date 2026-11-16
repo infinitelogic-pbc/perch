@@ -72,16 +72,17 @@ export interface Tool {
 export const TOOLS: Tool[] = [
   { name: 'describe_object', kind: 'read', does: 'Name, class, live check-in, tables with columns and row counts, files, next alarm, preview state. Start here.' },
   { name: 'read_code', kind: 'read', does: 'Files at the live check-in, the preview, or any check-in id (a 4+ character prefix works). Binary files come back as base64.' },
-  { name: 'list_checkins', kind: 'read', does: 'History, newest first, with unified diffs and the migrations each check-in added.' },
+  { name: 'list_checkins', kind: 'read', does: 'History, newest first, with the migrations each check-in added. Unified diffs on request.' },
   { name: 'query_data', kind: 'read', does: 'Read-only SQL over the object’s own tables, live or preview. At most 500 rows.' },
-  { name: 'propose_change', kind: 'write', does: 'Whole files, exact-string edits and new migrations, applied to a preview copy of the file (live data included), built there, stored tests run. Proposals stack; restart starts over from live.' },
-  { name: 'test_call', kind: 'write', does: 'fetch, an RPC method or alarm() on the preview. Returns the result, console logs and the rows each table gained, changed or lost.' },
+  { name: 'propose_change', kind: 'destructive', does: 'Changes the preview copy only. Whole files, exact-string edits and new migrations, applied to a preview copy of the file (live data included), built there, stored tests run. Proposals stack; restart starts over from live.' },
+  { name: 'test_call', kind: 'destructive', does: 'A write call on the preview copy: POST, PUT, PATCH or DELETE to fetch(), an RPC method, or alarm(). Returns the result, console logs and the rows each table gained, changed or lost.' },
+  { name: 'read_object', kind: 'read', does: 'A read of live or the preview: GET or HEAD to fetch() or public/, or an RPC method. The runtime refuses any write made during it and saves nothing.' },
   { name: 'run_tests', kind: 'read', does: 'Runs the object’s test/*.ts files. Each test gets its own fresh, empty copy of the object and a clock it controls.' },
   { name: 'list_changes', kind: 'read', does: 'Recent data changes on live: the event, the time, rows per table, and whether each can be undone.' },
   { name: 'undo_changes', kind: 'destructive', does: 'Reverses a data change and every newer one in one transaction. Refused across a migration. Recorded, so an undo can be undone.' },
   { name: 'release_change', kind: 'destructive', does: 'Runs the preview’s migrations on the live file and moves live to its code, squashed into one check-in, in one transaction. Refused if the preview did not build, a stored test fails, or live moved.' },
   { name: 'rollback_code', kind: 'destructive', does: 'Moves live back to an earlier check-in. Code only, never schema: refused when that code no longer fits the tables.' },
-  { name: 'call_object', kind: 'destructive', does: 'fetch or an RPC method on the live object. Writes change live data.' },
+  { name: 'call_object', kind: 'destructive', does: 'A write call on the live object: POST, PUT, PATCH or DELETE to fetch(), or an RPC method.' },
 ];
 
 export interface Command {

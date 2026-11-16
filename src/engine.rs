@@ -41,8 +41,19 @@ pub struct EngineState {
     pub savepoint: u32,
     /// Did this event call setAlarm or deleteAlarm?
     pub alarm_touched: bool,
+    /// This event is a read: every write op is refused (read_object).
+    pub read_only: bool,
     /// Echo log lines to stderr as they happen (pdo run).
     pub echo_logs: bool,
+}
+
+pub const READ_ONLY_MSG: &str = "this call is read-only, so the write was refused; nothing was changed. Use the write tool (call_object on live, test_call on the preview) for calls that change data.";
+
+fn refuse_if_read_only(state: &mut OpState) -> Result<(), JsErrorBox> {
+    if state.borrow::<EngineState>().read_only {
+        return Err(JsErrorBox::generic(READ_ONLY_MSG));
+    }
+    Ok(())
 }
 
 fn st(state: &mut OpState) -> &mut EngineState {
@@ -156,7 +167,14 @@ fn op_sql_exec(
     #[serde] params: Vec<Value>,
 ) -> Result<SqlResult, JsErrorBox> {
     let s = st(state);
-    let (columns, rows, written) = exec_sql(&s.conn, &query, &params)?;
+    let read_only = s.read_only;
+    let (columns, rows, written) = exec_sql(&s.conn, &query, &params).map_err(|e| {
+        if read_only && e.to_string().contains("not authorized") {
+            JsErrorBox::generic(READ_ONLY_MSG)
+        } else {
+            e
+        }
+    })?;
     Ok(SqlResult {
         rows_read: rows.len() as u64,
         columns,
@@ -215,6 +233,7 @@ fn op_kv_get(state: &mut OpState, #[string] key: String) -> Result<Option<ToJsBu
 
 #[op2]
 fn op_kv_put(state: &mut OpState, #[string] key: String, #[buffer] value: JsBuffer) -> Result<(), JsErrorBox> {
+    refuse_if_read_only(state)?;
     let bytes: &[u8] = &value;
     privileged(state, |c| {
         c.execute(
@@ -227,6 +246,7 @@ fn op_kv_put(state: &mut OpState, #[string] key: String, #[buffer] value: JsBuff
 
 #[op2(fast)]
 fn op_kv_delete(state: &mut OpState, #[string] key: String) -> Result<bool, JsErrorBox> {
+    refuse_if_read_only(state)?;
     privileged(state, |c| c.execute("DELETE FROM _obj_kv WHERE key=?", [&key])).map(|n| n > 0)
 }
 
@@ -279,6 +299,7 @@ fn op_kv_list(state: &mut OpState, #[serde] o: ListOpts) -> Result<Vec<(String, 
 
 #[op2(fast)]
 fn op_kv_delete_all(state: &mut OpState) -> Result<(), JsErrorBox> {
+    refuse_if_read_only(state)?;
     privileged(state, |c| c.execute_batch("DELETE FROM _obj_kv; DELETE FROM _obj_alarms;"))
 }
 
@@ -296,6 +317,7 @@ fn op_alarm_get(state: &mut OpState) -> Result<f64, JsErrorBox> {
 
 #[op2(fast)]
 fn op_alarm_set(state: &mut OpState, at: f64) -> Result<(), JsErrorBox> {
+    refuse_if_read_only(state)?;
     st(state).alarm_touched = true;
     let at = at as i64;
     privileged(state, |c| {
@@ -310,6 +332,7 @@ fn op_alarm_set(state: &mut OpState, at: f64) -> Result<(), JsErrorBox> {
 
 #[op2(fast)]
 fn op_alarm_delete(state: &mut OpState) -> Result<(), JsErrorBox> {
+    refuse_if_read_only(state)?;
     st(state).alarm_touched = true;
     privileged(state, |c| c.execute("DELETE FROM _obj_alarms", []))?;
     Ok(())
@@ -644,6 +667,7 @@ impl Engine {
             bodies: HashMap::new(),
             savepoint: 0,
             alarm_touched: false,
+            read_only: false,
             echo_logs,
         });
         rt.execute_script("pdo:bootstrap.js", include_str!("../js/bootstrap.js"))
@@ -669,6 +693,10 @@ impl Engine {
         mode.set(old);
         r.map_err(|e| anyhow!("loading module: {e}"))?;
         Ok(Engine { rt, next_id: 1 })
+    }
+
+    pub fn set_read_only(&mut self, on: bool) {
+        self.rt.op_state().borrow_mut().borrow_mut::<EngineState>().read_only = on;
     }
 
     pub fn alarm_touched(&mut self) -> bool {

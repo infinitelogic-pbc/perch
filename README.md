@@ -143,16 +143,17 @@ result carries a short guide to writing an object.
 | --- | --- | --- |
 | `describe_object` | readOnly | name, class, live check-in, tables + columns + row counts, files, next alarm, preview state |
 | `read_code` | readOnly | files at a check-in (live, `preview`, or an id prefix); binary as `{ base64 }` by path |
-| `list_checkins` | readOnly | history with unified diffs and the migrations each check-in added |
+| `list_checkins` | readOnly | history and the migrations each check-in added; unified diffs on request |
 | `query_data` | readOnly | read-only SQL over data tables, live or preview, 500 rows max |
-| `propose_change` | write | whole files, `edits` (exact old/new string replacements) and new migrations, applied to a preview copy (`todo.obj.preview`, live data included) and built there: modules load, the constructor runs, stored tests run. Proposals stack; `restart: true` starts from live |
-| `test_call` | write | fetch, RPC or alarm on the preview; returns the result, logs and rows changed per table |
+| `propose_change` | destructive | whole files, `edits` (exact old/new string replacements) and new migrations, applied to a preview copy (`todo.obj.preview`, live data included) and built there: modules load, the constructor runs, stored tests run. Proposals stack; `restart: true` starts from live |
+| `test_call` | destructive | a write call on the preview: POST/PUT/PATCH/DELETE to fetch(), an RPC method, or alarm(); returns the result, logs and rows changed per table |
+| `read_object` | readOnly | a read of live or the preview: GET/HEAD to fetch() or `public/`, or an RPC method. Enforced by the runtime: any SQL write, KV write or alarm change is refused and the transaction is rolled back |
 | `run_tests` | readOnly | runs `test/*.ts`, each test on its own fresh empty copy of the object |
 | `list_changes` | readOnly | recent data changes on live: event, time, rows per table, whether undoable |
 | `undo_changes` | destructive | reverses a data change and every newer one in one transaction; refused across a migration; recorded, so it can be undone |
 | `release_change` | destructive | runs the preview's migrations on live and moves the live check-in, squashed into one check-in, in one transaction; refused if the preview did not build, a stored test fails, or live moved |
 | `rollback_code` | destructive | moves the live check-in back; refused when that code's schema snapshot no longer fits (a table or column it knew is gone, or a new NOT NULL column has no default) |
-| `call_object` | destructive | fetch or RPC on the live object |
+| `call_object` | destructive | a write call on the live object: POST/PUT/PATCH/DELETE to fetch(), or an RPC method |
 
 Migrations only go forward; a rollback changes code, never schema.
 
@@ -209,6 +210,47 @@ changes go through the same gate as MCP (build, stored tests) and are released
 (`--no-release` stops at the preview). A failing commit exits 1 and leaves
 live unchanged. A checkout is refused once live has moved past it.
 
+## Claude connector directory rules
+
+The tool set follows Anthropic's
+[connector review criteria](https://claude.com/docs/connectors/building/review-criteria)
+and [Software Directory Policy](https://support.claude.com/en/articles/13145358-anthropic-software-directory-policy),
+checked by the end-to-end suite:
+
+| Rule | How pdo meets it |
+| --- | --- |
+| Every tool has a `title` and `readOnlyHint: true` or `destructiveHint: true` | All thirteen do, exactly one each. Seven are read-only; the six that modify anything (including the preview copy) are destructive |
+| No tool accepts both safe and unsafe HTTP methods | `read_object` takes only GET and HEAD; `test_call` and `call_object` take only POST, PUT, PATCH and DELETE, and each refuses the other's methods with the name of the right tool |
+| Read-only means read-only | `read_object` and `query_data` are enforced by the SQLite authorizer and the runtime, not by convention: writes error and nothing is saved |
+| Freeform tools name their target API | `query_data` and migrations link the SQLite docs; `propose_change` links the Cloudflare Durable Objects API; the call tools name the object's own `fetch()` routes and public methods |
+| Tool names are 64 characters or fewer | The longest is 15 |
+| Descriptions say what the tool does, and match it | No instructions to call other software, no behavior outside the tool |
+| Errors are actionable | Refusals say why and what to do instead; no bare "Bad Request" |
+| Responses are sized to the task | `list_checkins` leaves diffs out unless asked; `read_code` stubs large and binary files in the full listing and caps one file at 512 KiB; `query_data` returns at most 500 rows; tool text is compact JSON |
+| No conversation data collected | pdo stores only what tools are asked to store |
+
+What a directory submission still needs, beyond the tools:
+
+- **A remote server.** The directory accepts only remote MCP servers over
+  HTTPS (Streamable HTTP), with OAuth 2.0 when sign-in is needed. `pdo mcp` is
+  local stdio today, so it can be listed only inside a plugin until there is a
+  hosted pdo (the server mode on the not-yet list, plus HTTP transport and
+  OAuth).
+- **Listing materials:** a public documentation URL, a privacy policy URL, a
+  support contact, an icon, at least three example prompts, and a test account
+  for review.
+
+## Privacy
+
+`pdo` runs on your machine. It has no telemetry and makes no network requests
+of its own. An object's code and data live in its `.obj` file and nowhere
+else; object code cannot make outbound requests (`fetch` throws in v0). The
+MCP server speaks only over stdio to the client that started it, and stores
+only what its tools are asked to store. Data leaves the machine only when you
+send it: `pdo export` followed by `wrangler deploy` uploads the object's code,
+static files and migrations (not its data) to your Cloudflare account, and
+`pdo run --host` exposes the object on the network interface you choose.
+
 ## Direction
 
 The next layer is a framework class that lives in an object and turns it into
@@ -237,7 +279,8 @@ do locally. Moving state in or out of Cloudflare is not in v0.
   breaking migration is refused, serves a copy of the file, and covers static
   files (every clean-URL case, 304s, HEAD, base64 images, serving while the
   constructor throws, the export's assets config), edits, the stored-test
-  release gate, data undo and redo, and checkout/commit (106 checks).
+  release gate, data undo and redo, checkout/commit, and the directory rules
+  below (annotations, read/write separation, enforced read-only calls) (119 checks).
 - `bun test/http-calls.ts <base>` runs the same 17 HTTP calls (API, RPC, alarm,
   static files, an imported template) against any host; it passes against
   `pdo run` and against the `pdo export` deploy on Cloudflare.

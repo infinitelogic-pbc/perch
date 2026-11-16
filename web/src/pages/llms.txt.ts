@@ -64,17 +64,26 @@ ${RUNTIME.map((r) => `- ${r.api}: ${r.note}`).join('\n')}
 ## MCP (\`pdo mcp <file>\`, stdio, JSON-RPC 2.0, one message per line)
 
 Workflow: describe_object, read_code, propose_change (code + tests +
-migrations on the preview; stored tests run), test_call (on the preview),
-release_change (live; refused while a stored test fails). rollback_code moves
-code back if it still fits the schema. undo_changes reverses recent data
-changes. call_object hits live.
+migrations on the preview; stored tests run), read_object and test_call
+(reads and writes on the preview), release_change (live; refused while a
+stored test fails). rollback_code moves code back if it still fits the
+schema. undo_changes reverses recent data changes. read_object reads live;
+call_object writes to it.
 
 ${TOOLS.map((t) => `- \`${t.name}\` [${t.kind}]: ${t.does}`).join('\n')}
 
-Annotations: describe_object, read_code, list_checkins, query_data, run_tests
-and list_changes are readOnlyHint; release_change, rollback_code,
-undo_changes and call_object are destructiveHint. call_object takes kind
-fetch or rpc; test_call also takes kind alarm.
+Annotations follow Anthropic's connector directory rules: every tool has a
+title and exactly one of readOnlyHint or destructiveHint. Read-only:
+describe_object, read_code, list_checkins, query_data, read_object, run_tests,
+list_changes. Destructive (anything that modifies data, the preview copy
+included): propose_change, test_call, undo_changes, release_change,
+rollback_code, call_object.
+
+Reads and writes are separate tools. read_object takes GET or HEAD (or an RPC
+method) on live or the preview, and the runtime refuses any SQL write,
+key-value write or alarm change made during it. test_call (preview) and
+call_object (live) take POST, PUT, PATCH or DELETE, or an RPC method;
+test_call also takes kind alarm.
 
 Edits: propose_change takes \`edits: [{ path, old, new, replace_all? }]\`.
 \`old\` must match the file exactly and occur once. Use these after the first

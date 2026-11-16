@@ -13,7 +13,7 @@ const PROTOCOL_VERSIONS: &[&str] = &["2025-11-25", "2025-06-18", "2025-03-26", "
 
 pub const GUIDE: &str = r#"This server edits one portable durable object: a single SQLite file holding a Cloudflare-style Durable Object's code, history and data.
 
-Workflow: describe_object → read_code → propose_change (code + tests + migrations, applied to a preview copy, built there, stored tests run) → test_call (try it against the preview) → release_change (refused if tests fail; runs the migrations on the live file and moves the live check-in). rollback_code moves code back if it still fits the schema. undo_changes reverses recent data changes. call_object hits the live object.
+Workflow: describe_object → read_code → propose_change (code + tests + migrations, applied to a preview copy, built there, stored tests run) → read_object and test_call (try reads and writes against the preview) → release_change (refused if tests fail; runs the migrations on the live file and moves the live check-in). rollback_code moves code back if it still fits the schema. undo_changes reverses recent data changes. read_object reads the live object (GET, getters) with writes refused by the runtime; call_object makes write calls on it.
 
 Writing the object:
 - The entry file is src/index.ts. It exports the object's class (the name describe_object reports) extending DurableObject from "cloudflare:workers". Constructor signature is (ctx, env); call super(ctx, env).
@@ -39,16 +39,34 @@ Writing the object:
 - Keep the class Cloudflare-compatible: the same source deploys unchanged with `pdo export` + wrangler."#;
 
 fn tools_list() -> Value {
-    let call_schema = json!({
+    // Reads and writes are separate tools. The write tools take only unsafe
+    // HTTP methods; read_object takes only GET and HEAD and the runtime
+    // refuses any write made during it.
+    let write_schema = |kinds: &[&str], kind_help: &str| {
+        json!({
+            "type": "object",
+            "properties": {
+                "kind": { "type": "string", "enum": kinds, "description": kind_help },
+                "path": { "type": "string", "description": "fetch: path and query on the object's own fetch() handler, e.g. /todos/123" },
+                "http_method": { "type": "string", "enum": ["POST", "PUT", "PATCH", "DELETE"], "default": "POST", "description": "fetch: the HTTP method. GET and HEAD are reads and go through read_object." },
+                "headers": { "type": "object", "additionalProperties": { "type": "string" } },
+                "body": { "description": "fetch: a string is sent as-is; any other JSON value is sent as application/json" },
+                "method": { "type": "string", "description": "rpc: the name of a public method on the object's class" },
+                "args": { "type": "array", "description": "rpc: positional arguments (JSON)" }
+            },
+            "required": ["kind"]
+        })
+    };
+    let read_schema = json!({
         "type": "object",
         "properties": {
-            "kind": { "type": "string", "enum": ["fetch", "rpc", "alarm"], "description": "fetch: an HTTP request to fetch(); rpc: a public method; alarm: run alarm() now" },
+            "kind": { "type": "string", "enum": ["fetch", "rpc"], "description": "fetch: a GET or HEAD request to the object's fetch() handler or its public/ files; rpc: a public method" },
             "path": { "type": "string", "description": "fetch: path and query, e.g. /todos?done=0" },
-            "http_method": { "type": "string", "description": "fetch: GET, POST, PUT, PATCH, DELETE (default GET, or POST when a body is given)" },
+            "http_method": { "type": "string", "enum": ["GET", "HEAD"], "default": "GET" },
             "headers": { "type": "object", "additionalProperties": { "type": "string" } },
-            "body": { "description": "fetch: a string is sent as-is; any other JSON value is sent as application/json" },
-            "method": { "type": "string", "description": "rpc: the method name" },
-            "args": { "type": "array", "description": "rpc: positional arguments (JSON)" }
+            "method": { "type": "string", "description": "rpc: the name of a public method on the object's class" },
+            "args": { "type": "array", "description": "rpc: positional arguments (JSON)" },
+            "target": { "type": "string", "enum": ["live", "preview"], "default": "live" }
         },
         "required": ["kind"]
     });
@@ -56,7 +74,7 @@ fn tools_list() -> Value {
         {
             "name": "describe_object",
             "title": "Describe object",
-            "description": "Name, class, live check-in, data tables with columns and row counts, code file list, next alarm and preview state. Start here. target \"preview\" describes the preview copy (its schema, data counts and alarm).",
+            "description": "Name, class, live check-in, data tables with columns and row counts, code file list, next alarm and preview state. Useful as the first call, to see what the object contains. target \"preview\" describes the preview copy (its schema, data counts and alarm).",
             "inputSchema": { "type": "object", "properties": {
                 "target": { "type": "string", "enum": ["live", "preview"], "default": "live" }
             } },
@@ -65,7 +83,7 @@ fn tools_list() -> Value {
         {
             "name": "read_code",
             "title": "Read code",
-            "description": "Files at a check-in: the live one by default, \"preview\" for the preview head, or a check-in id (prefix of 4+ characters works). Pass path for one file. Text comes back as strings; binary files as { base64 } when asked for by path, otherwise as a size stub.",
+            "description": "Files at a check-in: the live one by default, \"preview\" for the preview head, or a check-in id (prefix of 4+ characters works). Pass path for one file. Text comes back as strings; binary files as { base64 } when asked for by path, otherwise as a size stub. In the full listing, text files over 32 KiB come back as a size stub too; one file by path is returned up to 512 KiB.",
             "inputSchema": { "type": "object", "properties": {
                 "checkin": { "type": "string", "description": "check-in id or prefix, or \"preview\"; default live" },
                 "path": { "type": "string", "description": "one file, e.g. src/index.ts" }
@@ -75,10 +93,10 @@ fn tools_list() -> Value {
         {
             "name": "list_checkins",
             "title": "List check-ins",
-            "description": "Code history, newest first, with unified diffs against each parent and the migrations each check-in added.",
+            "description": "Code history, newest first: id, message, time, files, and the migrations each check-in added. Set diffs to include a unified diff of each check-in against its parent.",
             "inputSchema": { "type": "object", "properties": {
-                "limit": { "type": "integer", "minimum": 1, "default": 20 },
-                "diffs": { "type": "boolean", "default": true }
+                "limit": { "type": "integer", "minimum": 1, "default": 10 },
+                "diffs": { "type": "boolean", "default": false, "description": "include unified diffs (larger response)" }
             } },
             "annotations": { "title": "List check-ins", "readOnlyHint": true, "idempotentHint": true, "openWorldHint": false }
         },
@@ -96,7 +114,7 @@ fn tools_list() -> Value {
         {
             "name": "propose_change",
             "title": "Propose change",
-            "description": "Code edits plus new migrations, applied to a preview copy of the file (live data included) and built there: the module graph loads and the constructor runs. Repeated proposals stack on the current preview; restart: true starts over from live. Files map path to full new contents (null deletes). Migrations are forward-only SQL, run in order, each with a name.",
+            "description": "Change this object's code, static files, stored tests and schema on a preview copy of the file; the live object is not touched until release_change. Takes whole files, exact-string edits and new migrations, applies them to the preview (a copy of the live file, data included), builds it (the module graph loads and the constructor runs) and runs the stored tests. Code is TypeScript against the Cloudflare Durable Objects API (https://developers.cloudflare.com/durable-objects/api/). Migrations are forward-only SQL in the SQLite dialect (https://sqlite.org/lang.html), run in order, each with a name. Repeated proposals stack on the current preview; restart: true discards the preview and starts over from live.",
             "inputSchema": { "type": "object", "properties": {
                 "message": { "type": "string", "description": "what this change does" },
                 "files": { "type": "object", "additionalProperties": { "anyOf": [
@@ -115,14 +133,21 @@ fn tools_list() -> Value {
                 }, "required": ["name", "sql"] } },
                 "restart": { "type": "boolean", "default": false, "description": "discard the current preview and start from live" }
             }, "required": ["message"] },
-            "annotations": { "title": "Propose change", "readOnlyHint": false, "destructiveHint": false, "idempotentHint": false, "openWorldHint": false }
+            "annotations": { "title": "Propose change", "readOnlyHint": false, "destructiveHint": true, "idempotentHint": false, "openWorldHint": false }
         },
         {
             "name": "test_call",
             "title": "Test call (preview)",
-            "description": "Call fetch, an RPC method or the alarm on the preview copy and return the result, console logs, the rows each table gained, changed or lost, and the preview's next alarm afterwards. Writes land in the preview only. An alarm run here clears the pending alarm unless the handler rescheduled it.",
-            "inputSchema": call_schema.clone(),
-            "annotations": { "title": "Test call (preview)", "readOnlyHint": false, "destructiveHint": false, "idempotentHint": false, "openWorldHint": false }
+            "description": "Make a write call on the preview copy of this object: a POST, PUT, PATCH or DELETE to the object's own fetch() handler, one of its public RPC methods, or its alarm() handler (the routes and methods are the ones read_code shows). Returns the result, console logs, the rows each table gained, changed or lost, and the preview's next alarm afterwards. Changes data in the preview copy only, never live. An alarm run here clears the pending alarm unless the handler rescheduled it.",
+            "inputSchema": write_schema(&["fetch", "rpc", "alarm"], "fetch: an HTTP write to fetch(); rpc: a public method; alarm: run alarm() now"),
+            "annotations": { "title": "Test call (preview)", "readOnlyHint": false, "destructiveHint": true, "idempotentHint": false, "openWorldHint": false }
+        },
+        {
+            "name": "read_object",
+            "title": "Read from object",
+            "description": "Read from this object without changing it: a GET or HEAD to the object's own fetch() handler or its public/ files, or a call to one of its public RPC methods (the routes and methods are the ones read_code shows). The runtime enforces the read: any SQL write, key-value write or alarm change made during the call is refused with an error and nothing is saved. target \"preview\" reads the preview copy. Use it to view pages and call getters.",
+            "inputSchema": read_schema,
+            "annotations": { "title": "Read from object", "readOnlyHint": true, "idempotentHint": true, "openWorldHint": false }
         },
         {
             "name": "run_tests",
@@ -172,8 +197,8 @@ fn tools_list() -> Value {
         {
             "name": "call_object",
             "title": "Call object (live)",
-            "description": "Call fetch or an RPC method on the live object. Writes change live data.",
-            "inputSchema": call_schema,
+            "description": "Make a write call on the live object: a POST, PUT, PATCH or DELETE to the object's own fetch() handler, or one of its public RPC methods (the routes and methods are the ones read_code shows). Changes live data; list_changes and undo_changes can reverse it. For reads, use read_object.",
+            "inputSchema": write_schema(&["fetch", "rpc"], "fetch: an HTTP write to fetch(); rpc: a public method"),
             "annotations": { "title": "Call object (live)", "readOnlyHint": false, "destructiveHint": true, "idempotentHint": false, "openWorldHint": false }
         }
     ])
@@ -185,8 +210,8 @@ async fn call_tool(tools: &mut Tools, name: &str, args: Value) -> Result<Value> 
         "describe_object" => tools.describe(s("target").as_deref()),
         "read_code" => tools.read_code(s("checkin").as_deref(), s("path").as_deref()),
         "list_checkins" => tools.list_checkins(
-            args.get("limit").and_then(|v| v.as_u64()).unwrap_or(20) as usize,
-            args.get("diffs").and_then(|v| v.as_bool()).unwrap_or(true),
+            args.get("limit").and_then(|v| v.as_u64()).unwrap_or(10) as usize,
+            args.get("diffs").and_then(|v| v.as_bool()).unwrap_or(false),
         ),
         "query_data" => {
             let sql = s("sql").ok_or_else(|| anyhow::anyhow!("sql is required"))?;
@@ -195,6 +220,10 @@ async fn call_tool(tools: &mut Tools, name: &str, args: Value) -> Result<Value> 
         }
         "propose_change" => tools.propose_change(serde_json::from_value::<ProposeArgs>(args)?).await,
         "test_call" => tools.test_call(serde_json::from_value::<CallArgs>(args)?).await,
+        "read_object" => {
+            let target = s("target");
+            tools.read_object(serde_json::from_value::<CallArgs>(args)?, target.as_deref()).await
+        }
         "run_tests" => tools.run_tests(s("target").as_deref()).await,
         "list_changes" => tools.list_changes(args.get("limit").and_then(|v| v.as_u64()).unwrap_or(20) as usize),
         "undo_changes" => {
@@ -261,7 +290,7 @@ pub async fn serve(path: PathBuf) -> Result<()> {
                             || v.pointer("/build/ok").and_then(|o| o.as_bool()) == Some(false)
                             || v.pointer("/tests/ok").and_then(|o| o.as_bool()) == Some(false);
                         Ok(json!({
-                            "content": [{ "type": "text", "text": serde_json::to_string_pretty(&v).unwrap() }],
+                            "content": [{ "type": "text", "text": serde_json::to_string(&v).unwrap() }],
                             "structuredContent": v,
                             "isError": is_error,
                         }))

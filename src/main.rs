@@ -216,7 +216,7 @@ fn main() -> Result<()> {
             let mut t = Tools::new(file)?;
             let body = data.map(|d| serde_json::from_str::<Value>(&d).unwrap_or(Value::String(d)));
             let v = t
-                .call_object(CallArgs { kind: "fetch".into(), path: Some(path), http_method: Some(method), body, ..Default::default() })
+                .call_object(CallArgs { kind: "fetch".into(), path: Some(path), http_method: Some(method), body, allow_safe: true, ..Default::default() })
                 .await?;
             print(&v);
             Ok(())

@@ -68,7 +68,19 @@ impl FileValue {
 
 fn file_json(bytes: &[u8], full: bool) -> Value {
     use base64::Engine;
+    // Keep responses proportionate: the full listing inlines only small text
+    // files; one file asked for by path comes back whole up to 512 KiB.
+    const LIST_MAX: usize = 32 * 1024;
+    const ONE_MAX: usize = 512 * 1024;
     match std::str::from_utf8(bytes) {
+        Ok(_) if !full && bytes.len() > LIST_MAX => json!({ "text": true, "bytes": bytes.len(), "note": "large file: pass path to read it" }),
+        Ok(s) if s.len() > ONE_MAX => {
+            let mut end = ONE_MAX;
+            while !s.is_char_boundary(end) {
+                end -= 1;
+            }
+            json!({ "text": &s[..end], "truncated": true, "bytes": bytes.len() })
+        }
         Ok(s) => Value::String(s.to_string()),
         Err(_) if full => json!({ "base64": base64::engine::general_purpose::STANDARD.encode(bytes) }),
         Err(_) => json!({ "binary": true, "bytes": bytes.len(), "sha256": crate::store::sha256_hex(bytes) }),
@@ -90,6 +102,9 @@ pub struct CallArgs {
     pub method: Option<String>,
     #[serde(default)]
     pub args: Vec<Value>,
+    /// Set by the CLI and by read_object, never by MCP input: allow GET/HEAD.
+    #[serde(skip)]
+    pub allow_safe: bool,
 }
 
 pub fn preview_path(path: &Path) -> PathBuf {
@@ -516,8 +531,17 @@ impl Tools {
                         serde_json::to_vec(other)?
                     }
                 };
+                let method = c
+                    .http_method
+                    .clone()
+                    .unwrap_or_else(|| if c.allow_safe && body.is_empty() { "GET".into() } else { "POST".into() })
+                    .to_uppercase();
+                // Reads and writes are separate tools: the write tools never take GET or HEAD.
+                if !c.allow_safe && matches!(method.as_str(), "GET" | "HEAD" | "OPTIONS") {
+                    bail!("{method} is a read: use read_object (target \"live\" or \"preview\"). This tool takes POST, PUT, PATCH and DELETE.");
+                }
                 Event::Fetch {
-                    method: c.http_method.clone().unwrap_or_else(|| if body.is_empty() { "GET".into() } else { "POST".into() }).to_uppercase(),
+                    method,
                     url: format!("http://{name}.pdo.local{path}"),
                     headers,
                     body,
@@ -532,7 +556,53 @@ impl Tools {
         })
     }
 
+    /// A read of the object: GET/HEAD to fetch(), or a method call, with every
+    /// write refused by the runtime and the transaction rolled back.
+    pub async fn read_object(&mut self, mut c: CallArgs, target: Option<&str>) -> Result<Value> {
+        let preview = match target {
+            Some("preview") => true,
+            None | Some("live") => false,
+            Some(t) => bail!("target must be live or preview (got {t:?})"),
+        };
+        match c.kind.as_str() {
+            "fetch" => {
+                let m = c.http_method.clone().unwrap_or_else(|| "GET".into()).to_uppercase();
+                if m != "GET" && m != "HEAD" {
+                    bail!("read_object takes GET or HEAD; {m} changes data, so use {}", if preview { "test_call" } else { "call_object" });
+                }
+                if !matches!(c.body, None | Some(Value::Null)) {
+                    bail!("read_object requests have no body");
+                }
+                c.http_method = Some(m);
+            }
+            "rpc" => {}
+            k => bail!("kind must be fetch or rpc (got {k:?})"),
+        }
+        c.allow_safe = true;
+        if preview {
+            let ppath = preview_path(&self.path);
+            if !ppath.exists() {
+                bail!("there is no preview copy; propose_change creates one");
+            }
+            if self.preview.is_none() {
+                self.preview = Some(Host::open(&ppath, false)?);
+            }
+        } else if self.live.is_none() {
+            self.live = Some(Host::open(&self.path, false)?);
+        }
+        let name = if preview { self.preview.as_ref() } else { self.live.as_ref() }.unwrap().store.meta_req("name")?;
+        let ev = self.event_for(&c, &name)?;
+        let h = if preview { self.preview.as_mut() } else { self.live.as_mut() }.unwrap();
+        let o = h.read_event(ev).await?;
+        let mut v = outcome_json(&o);
+        v["target"] = json!(if preview { "preview" } else { "live" });
+        v["read_only"] = json!(true);
+        Ok(v)
+    }
+
     pub async fn test_call(&mut self, c: CallArgs) -> Result<Value> {
+        // Validate the call shape (including "GET is a read") before anything else.
+        self.event_for(&c, "check")?;
         let ppath = preview_path(&self.path);
         if !ppath.exists() {
             bail!("there is no preview copy; propose_change creates one");

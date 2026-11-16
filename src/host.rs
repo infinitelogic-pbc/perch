@@ -83,6 +83,8 @@ pub struct Host {
     tests: Vec<String>,
     /// The data epoch the engine was built at; an undo bumps it.
     epoch: Option<String>,
+    /// The next event is a read: writes are refused and the transaction is rolled back.
+    read_only: bool,
 }
 
 /// Count rows touched per table in a changeset.
@@ -121,6 +123,7 @@ impl Host {
             pending_logs: vec![],
             tests: vec![],
             epoch: None,
+            read_only: false,
         })
     }
 
@@ -179,16 +182,19 @@ impl Host {
     ) -> Result<(std::result::Result<Dispatched, String>, Vec<u8>)> {
         let conn = self.store.conn.clone();
         let mode = self.store.mode.clone();
+        let read_only = self.read_only;
         let engine = self.engine.as_mut().ok_or_else(|| anyhow!("engine not loaded"))?;
+        engine.set_read_only(read_only);
         mode.set(Mode::Privileged);
-        conn.execute_batch("BEGIN IMMEDIATE")?;
+        conn.execute_batch(if read_only { "BEGIN" } else { "BEGIN IMMEDIATE" })?;
         let result = async {
             let mut session = Session::new(&conn)?;
             session.table_filter(Some(|t: &str| !t.starts_with("_obj_") || t == "_obj_kv"));
             session.attach::<&str>(None)?;
-            mode.set(Mode::Sandbox);
+            mode.set(if read_only { Mode::ReadOnly } else { Mode::Sandbox });
             let r = engine.dispatch(ev, body).await;
             mode.set(Mode::Privileged);
+            engine.set_read_only(false);
             let mut cs = Vec::new();
             session.changeset_strm(&mut cs)?;
             drop(session);
@@ -204,6 +210,11 @@ impl Host {
         .await;
         mode.set(Mode::Privileged);
         match result {
+            Ok(_) if read_only => {
+                // A read leaves nothing behind, whatever the handler did.
+                conn.execute_batch("ROLLBACK")?;
+                result.map(|(r, _)| (r, Vec::new()))
+            }
             Ok(v) => {
                 conn.execute_batch("COMMIT")?;
                 // Fold the WAL into the main file so a plain copy of the .obj is complete.
@@ -270,6 +281,23 @@ impl Host {
                 }))
             }
         }
+    }
+
+    /// Run a fetch or RPC as a read: SQL writes, KV writes and alarm changes
+    /// are refused, and the transaction is rolled back. The constructor, if it
+    /// has not run yet in this process, runs normally first.
+    pub async fn read_event(&mut self, ev: Event) -> Result<Outcome> {
+        // Static files never need the engine, even when the class is broken.
+        if let Event::Fetch { method, url, headers, .. } = &ev {
+            if let Some(o) = self.try_asset(method, url, headers)? {
+                return Ok(o);
+            }
+        }
+        self.ensure().await?;
+        self.read_only = true;
+        let r = self.event(ev).await;
+        self.read_only = false;
+        r
     }
 
     pub async fn event(&mut self, ev: Event) -> Result<Outcome> {

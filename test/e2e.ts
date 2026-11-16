@@ -66,10 +66,14 @@ const init = await mcp.rpc("initialize", { protocolVersion: "2025-06-18", capabi
 ok(init.result.instructions.includes("propose_change"), "initialize returns the agent guide");
 const list = await mcp.rpc("tools/list");
 const names = list.result.tools.map((t: any) => t.name);
-ok(names.length === 12, `twelve tools (${names.join(", ")})`);
+ok(names.length === 13, `thirteen tools (${names.join(", ")})`);
 ok(list.result.tools.every((t: any) => t.title && t.annotations), "every tool has a title and annotations");
 const ann = Object.fromEntries(list.result.tools.map((t: any) => [t.name, t.annotations]));
-ok(ann.describe_object.readOnlyHint && ann.query_data.readOnlyHint && ann.release_change.destructiveHint && ann.call_object.destructiveHint, "annotations match the plan");
+ok(list.result.tools.every((t: any) => (t.annotations.readOnlyHint === true) !== (t.annotations.destructiveHint === true)), "every tool is exactly one of readOnlyHint or destructiveHint");
+const READS = ["describe_object", "read_code", "list_checkins", "query_data", "read_object", "run_tests", "list_changes"];
+ok(names.every((n: string) => READS.includes(n) === (ann[n].readOnlyHint === true)) && names.every((n: string) => n.length <= 64), "the read-only set is the seven read tools; names are within 64 characters");
+const props = (n: string) => list.result.tools.find((t: any) => t.name === n).inputSchema.properties;
+ok(!props("call_object").http_method.enum.includes("GET") && !props("test_call").http_method.enum.includes("GET") && props("read_object").http_method.enum.join() === "GET,HEAD", "no tool accepts both safe and unsafe HTTP methods");
 
 let r = await mcp.tool("propose_change", {
   message: "to-do API with nightly cleanup",
@@ -144,7 +148,7 @@ ok(r.v.live_checkin.id === good && r.v.tables.some((t: any) => t.name === "todos
 r = await mcp.tool("call_object", { kind: "rpc", method: "add", args: ["write tests"] });
 ok(r.v.ok && r.v.result.title === "write tests", "call_object rpc on live");
 ok(sh(["describe", file]).next_alarm, "first live event ran the constructor, which scheduled the nightly alarm");
-r = await mcp.tool("list_checkins");
+r = await mcp.tool("list_checkins", { diffs: true });
 ok(r.v.checkins[0].live && r.v.checkins[0].migrations.length === 1 && r.v.checkins[0].diff.includes("+import { uuidv7 }"), "list_checkins shows diff and migration");
 
 // ------------------------------------------------------------------ pdo run: HTTP + RPC + alarm
@@ -251,7 +255,10 @@ export class Site extends DurableObject {
   },
 });
 ok(!r.v.build.ok && r.v.build.error.includes("boom in constructor"), "a throwing constructor fails the build");
-const get = (path: string, extra: any = {}) => m2.tool("test_call", { kind: "fetch", path, ...extra });
+const get = (path: string, extra: any = {}) =>
+  extra.http_method === "POST"
+    ? m2.tool("test_call", { kind: "fetch", path, ...extra })
+    : m2.tool("read_object", { kind: "fetch", path, target: "preview", ...extra });
 r = await get("/");
 ok(r.v.status === 200 && r.v.body === "<h1>home</h1>" && r.v.asset === "public/index.html", "/ serves public/index.html without waking the broken object");
 ok(Object.keys(r.v.changes).length === 0 && r.v.logs.length === 0, "a static file runs no event (no changes, no logs)");
@@ -301,10 +308,10 @@ r = await m2.tool("release_change", {});
 ok(!r.isError, "release the site");
 r = await m2.tool("describe_object");
 ok(r.v.public.length === 4 && r.v.files.every((f: any) => f.path.startsWith("src/")), "describe_object lists static files separately");
-r = await m2.tool("list_checkins");
+r = await m2.tool("list_checkins", { diffs: true });
 ok(r.v.checkins[0].diff.includes("Binary file public/logo.png differs"), "diffs mark binary files");
-r = await m2.tool("call_object", { kind: "fetch", path: "/docs/" });
-ok(r.v.body === "<h1>docs</h1>", "static files on live through call_object");
+r = await m2.tool("read_object", { kind: "fetch", path: "/docs/" });
+ok(r.v.body === "<h1>docs</h1>" && r.v.read_only, "static files on live through read_object");
 m2.close();
 
 // pdo run: a class with no fetch() still serves its files, and 404s the rest.
@@ -394,6 +401,31 @@ r = await m3.tool("release_change", {});
 ok(!r.isError, "release a migration");
 r = await m3.tool("undo_changes", { back_to: firstAdd });
 ok(r.isError && r.text.includes("migration"), "undo is refused across a migration");
+
+// Reads and writes are separate tools, and the read is enforced by the runtime.
+const before = (await m3.tool("list_changes", {})).v.total;
+r = await m3.tool("read_object", { kind: "rpc", method: "stats" });
+ok(r.v.ok && r.v.result.total === 2 && r.v.read_only, "read_object calls a getter");
+r = await m3.tool("read_object", { kind: "fetch", path: "/todos?done=0" });
+ok(r.v.status === 200 && r.v.json.length === 2, "read_object GETs a route");
+r = await m3.tool("read_object", { kind: "rpc", method: "add", args: ["sneaky"] });
+ok(r.isError && r.v.error.includes("read-only") && r.v.error.includes("call_object"), "a SQL write during read_object is refused, with the tool to use");
+r = await m3.tool("read_object", { kind: "rpc", method: "setRetention", args: [1] });
+ok(r.isError && r.v.error.includes("read-only"), "a key-value write during read_object is refused");
+r = await m3.tool("read_object", { kind: "rpc", method: "scheduleCleanup", args: [1] });
+ok(r.isError && r.v.error.includes("read-only"), "an alarm change during read_object is refused");
+r = await m3.tool("query_data", { sql: "SELECT count(*) FROM todos" });
+ok(r.v.rows[0][0] === 2 && (await m3.tool("list_changes", {})).v.total === before, "nothing was written or recorded by the refused reads");
+r = await m3.tool("read_object", { kind: "fetch", path: "/todos", http_method: "POST" });
+ok(r.isError && r.text.includes("call_object"), "read_object refuses POST");
+r = await m3.tool("call_object", { kind: "fetch", path: "/todos", http_method: "GET" });
+ok(r.isError && r.text.includes("read_object"), "call_object refuses GET");
+r = await m3.tool("test_call", { kind: "fetch", path: "/todos", http_method: "GET" });
+ok(r.isError && r.text.includes("read_object"), "test_call refuses GET");
+r = await m3.tool("call_object", { kind: "fetch", path: "/todos", body: { title: "third" } });
+ok(r.v.status === 201, "call_object defaults to POST and still writes");
+r = await m3.tool("list_checkins", {});
+ok(r.v.checkins[0].diff === undefined, "list_checkins leaves diffs out unless asked");
 m3.close();
 
 // Checkout, edit with ordinary tools, commit.
