@@ -58,6 +58,37 @@ test("cleanup removes items done for over a day, and keeps the rest", async (obj
   expect(await obj.storage.getAlarm()).toBeGreaterThan(obj.clock.now());
 });
 
+test("key-value storage keeps rich values", async (obj) => {
+  const value = {
+    when: new Date(5),
+    tags: new Set(["a", "b"]),
+    by: new Map<string, unknown>([["k", 12345678901234567890n]]),
+    bytes: new Uint8Array([1, 2, 255]),
+    negZero: -0,
+    missing: undefined,
+    nan: NaN,
+    $pdo: "a key that looks like a tag",
+    nested: [{ deep: [null, true, "x"] }],
+  };
+  await obj.storage.put("rich", value);
+  const got: any = await obj.storage.get("rich");
+  expect(got.when instanceof Date && got.when.getTime()).toBe(5);
+  expect([...got.tags]).toEqual(["a", "b"]);
+  expect(got.by.get("k")).toBe(12345678901234567890n);
+  expect(got.bytes instanceof Uint8Array && [...got.bytes]).toEqual([1, 2, 255]);
+  expect(Object.is(got.negZero, -0)).toBe(true);
+  expect("missing" in got && got.missing).toBeUndefined();
+  expect(Number.isNaN(got.nan)).toBe(true);
+  expect(got.$pdo).toBe("a key that looks like a tag");
+  expect(got.nested).toEqual([{ deep: [null, true, "x"] }]);
+  // Stored as plain JSON text, readable by any runtime.
+  const cyc: any = {};
+  cyc.self = cyc;
+  let refused = false;
+  try { await obj.storage.put("cyc", cyc); } catch { refused = true; }
+  expect(refused).toBe(true);
+});
+
 test("the stats page renders from its template", async (obj) => {
   await obj.rpc("add", "x");
   const res = await obj.fetch("/stats");

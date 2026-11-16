@@ -350,7 +350,7 @@ r = await m3.tool("propose_change", {
   },
   migrations: [{ name: "0001_todos", sql: src("migrations/0001_todos.sql") }],
 });
-ok(r.v.build.ok && r.v.tests.ok && r.v.tests.total === 7, "propose_change runs the stored tests (7 pass)");
+ok(r.v.build.ok && r.v.tests.ok && r.v.tests.total === 8, "propose_change runs the stored tests (8 pass)");
 
 // An edit that breaks behavior: caught by the tests, release refused.
 r = await m3.tool("propose_change", {
@@ -373,7 +373,7 @@ ok(r.v.tests.ok, "fixing it with an edit makes the tests pass");
 r = await m3.tool("release_change", { message: "to-do with stored tests" });
 ok(!r.isError && r.v.released, "release goes through once tests pass");
 r = await m3.tool("run_tests", { target: "live" });
-ok(r.v.ok && r.v.passed === 7 && r.v.target === "live", "run_tests on live");
+ok(r.v.ok && r.v.passed === 8 && r.v.target === "live", "run_tests on live");
 r = await m3.tool("query_data", { sql: "SELECT count(*) FROM todos" });
 ok(r.v.rows[0][0] === 0, "tests ran on scratch copies: live has no rows");
 
@@ -428,7 +428,7 @@ r = await m3.tool("list_checkins", {});
 ok(r.v.checkins[0].diff === undefined, "list_checkins leaves diffs out unless asked");
 m3.close();
 
-ok(sh(["test", gate]).passed === 7, "pdo test runs the stored tests from the CLI");
+ok(sh(["test", gate]).passed === 8, "pdo test runs the stored tests from the CLI");
 
 console.log(`\n${passed} checks passed (${dir})`);
 process.exit(0);

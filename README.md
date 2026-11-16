@@ -63,7 +63,7 @@ pdo export my.obj out/ && (cd out && bunx wrangler deploy)
 | `_obj_blobs` | content-addressed bytes (SHA-256 → contents): source files |
 | `_obj_checkins` | code history, Fossil style: id (SHA-256), parent, manifest (path → blob), message, time, schema snapshot |
 | `_obj_migrations` | ordered SQL migrations already applied, each tied to the check-in that introduced it |
-| `_obj_kv` | the key-value half of the storage API (values are V8 structured-clone bytes) |
+| `_obj_kv` | the key-value half of the storage API. Values are UTF-8 JSON that any runtime can read; what plain JSON cannot carry (Date, Map, Set, bytes, bigint, undefined, NaN) is tagged with `$pdo`. Values written before this in V8's own format are still read by the native binary |
 | `_obj_alarms` | the next scheduled alarm and its retry count |
 | `_obj_changes` | a session-extension changeset for every event that wrote data (audit log, later undo and sync) |
 | everything else | the object's data, created and changed only by migrations |
@@ -256,6 +256,33 @@ interface is a spreadsheet: **tables** are the typed view of the database, and
 **sheets** are the UIs built on those tables. pdo stays the low-level layer
 underneath.
 
+## In the browser
+
+The same file runs in a browser tab, with no install and no server:
+[pdo.proc.io/run](https://pdo.proc.io/run). Open or drop a `.obj` and its app
+appears, running on SQLite compiled to WebAssembly and the browser's own
+JavaScript engine. Nothing is uploaded.
+
+- **One runtime, two hosts.** The browser runtime (`web/src/runtime`)
+  evaluates the same `js/bootstrap.js` the native binary embeds, so
+  `ctx.storage`, RPC rules and dispatch are the same code. It supplies the
+  operations underneath: SQL, KV and alarms over the WebAssembly SQLite, with
+  the same authorizer sandbox, one transaction and one recorded changeset per
+  event.
+- **Pages work as they are.** A service worker routes every request from the
+  app's iframe to the object: `public/` files with the Cloudflare rules, then
+  `fetch()`, and `POST /.pdo/rpc/<method>`. Links, forms, `fetch` and images
+  need no changes.
+- **Saving.** In Chrome and Edge a file opened with the picker or dropped on
+  the page is written back in place after each change, once you allow it.
+  Everywhere, Download gives you the file. A file changed in the browser opens
+  in native pdo, which can undo those changes like any others.
+- **Limits.** One object per tab. Alarms fire only while the tab is open. No
+  editing tools or MCP yet: it runs objects, it does not build them. Object
+  code has no network, and the app's pages can load only from the object
+  itself, but those pages do run on the site's origin, so open files from
+  people you trust. Cyclic imports are not supported there yet.
+
 ## Cloudflare
 
 `pdo export todo.obj out/` writes the live check-in's files unchanged plus a
@@ -282,6 +309,15 @@ do locally. Moving state in or out of Cloudflare is not in v0.
   static files, an imported template) against any host; it passes against
   `pdo run` and against the `pdo export` deploy on Cloudflare.
 - `cargo test` covers the URL-to-file rules.
+- `cd web && bun test/runtime.ts` runs the browser runtime under bun against
+  native pdo in both directions: native builds a file, the WebAssembly runtime
+  serves it (static files, fetch, RPC, alarm, the sandbox), and native opens
+  what it saved, reads its KV values, undoes one of its changes and passes the
+  stored tests (34 checks).
+- `cd web && bun test/browser.ts` drives the real `/run` page in headless
+  Chrome: the service worker, the app in its iframe, writes, download, and
+  reopening from disk (23 checks). `bun test/smoke.ts <file.obj>` opens any
+  object there and clicks around.
 
 ## Not yet
 

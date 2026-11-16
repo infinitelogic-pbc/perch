@@ -9,3 +9,6 @@ target/
 node_modules/
 .wrangler/
 dist/
+
+# The browser runner ships one example object.
+!web/public/examples/*.obj

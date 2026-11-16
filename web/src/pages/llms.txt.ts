@@ -116,6 +116,7 @@ ${NOT_YET.map((n) => `- ${n}`).join('\n')}
 ## Pages
 
 - ${base}/ : overview and quick start
+- ${base}/run : open a .obj and run it in the browser (SQLite as WebAssembly, the same bootstrap as the native runtime; nothing is uploaded)
 - ${base}/format : the _obj_ tables
 `;
 

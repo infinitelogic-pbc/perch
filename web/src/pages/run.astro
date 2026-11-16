@@ -1,0 +1,327 @@
+---
+import Base from '../layouts/Base.astro';
+---
+<Base title="Run an object in your browser: pdo" description="Open a .obj file and run it here, in this tab. SQLite and the object's code run in your browser; nothing is uploaded.">
+  <div class="wrap run">
+    <section id="start" class="start stack">
+      <p class="eyebrow">Run</p>
+      <h1>Open a <span class="mono">.obj</span> and run it in this tab.</h1>
+      <p class="lede">
+        The file is a SQLite database holding an app's code and data. This page runs both in your
+        browser: nothing is uploaded, and there is no server behind it.
+      </p>
+      <div id="drop" class="drop">
+        <p><strong>Drop a .obj file here</strong>, or</p>
+        <div class="row">
+          <button id="pick" class="btn primary" type="button">Open a file</button>
+          <button id="example" class="btn" type="button">Try the to-do example</button>
+        </div>
+        <input id="file" type="file" accept=".obj,.preview,application/octet-stream" hidden />
+        <p id="start-status" class="small" role="status" aria-live="polite"></p>
+      </div>
+      <ul class="notes small">
+        <li>Changes you make are written back to the file when your browser allows it (Chrome and Edge), and can always be downloaded.</li>
+        <li>Alarms fire only while this tab is open.</li>
+        <li>The object's code cannot reach the network, and its pages can load only from the object itself. Its pages do run on this site's origin, so open files from people you trust.</li>
+      </ul>
+    </section>
+
+    <section id="app" class="app" hidden>
+      <div class="bar">
+        <div class="who">
+          <strong id="obj-name" class="mono"></strong>
+          <span id="obj-class" class="small"></span>
+        </div>
+        <div class="addr">
+          <button id="back" class="icon" type="button" aria-label="Back" title="Back">&#8592;</button>
+          <button id="reload" class="icon" type="button" aria-label="Reload" title="Reload">&#8635;</button>
+          <form id="go"><input id="path" class="mono" aria-label="Path" spellcheck="false" autocomplete="off" value="/" /></form>
+        </div>
+        <div class="acts">
+          <span id="save-status" class="small" role="status" aria-live="polite"></span>
+          <button id="save" class="btn primary" type="button">Save</button>
+          <button id="download" class="btn" type="button">Download</button>
+          <button id="close" class="btn" type="button">Close</button>
+        </div>
+      </div>
+      <p id="load-error" class="error mono" hidden></p>
+      <iframe id="frame" title="The running object" sandbox="allow-scripts allow-forms allow-same-origin allow-modals allow-downloads allow-popups"></iframe>
+      <details class="panel">
+        <summary>Inside the file <span id="summary" class="small"></span></summary>
+        <div class="grid">
+          <dl id="facts"></dl>
+          <div>
+            <h2>Tables</h2>
+            <table><tbody id="tables"></tbody></table>
+          </div>
+          <div>
+            <h2>Console</h2>
+            <pre id="logs" class="logs" aria-live="polite">(nothing logged yet)</pre>
+          </div>
+        </div>
+      </details>
+    </section>
+  </div>
+</Base>
+
+<script>
+  type Info = {
+    name: string; class: string; checkin: string; message: string;
+    tables: { name: string; rows: number }[]; files: string[]; public: string[];
+    kvKeys: number; changesets: number; checkins: number; nextAlarm: number | null; loadError: string | null;
+  };
+  const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
+  const startStatus = $("start-status"), saveStatus = $("save-status");
+  const frame = $<HTMLIFrameElement>("frame"), pathInput = $<HTMLInputElement>("path");
+
+  let worker: Worker | null = null;
+  let ready = false;
+  let fileName = "object.obj";
+  let handle: any = null;        // FileSystemFileHandle when the browser gave us one
+  let canWrite = false;          // readwrite permission granted on the handle
+  let dirty = false;
+  let nextId = 1;
+  let saveTimer: any;
+  const waiting = new Map<number, (m: any) => void>();
+  const logs: string[] = [];
+
+  // ---------------------------------------------------------------- service worker
+  async function serviceWorker() {
+    if (!("serviceWorker" in navigator)) throw new Error("this browser has no service workers, which the runner needs");
+    await navigator.serviceWorker.register("/sw.js", { scope: "/" });
+    await navigator.serviceWorker.ready;
+    if (!navigator.serviceWorker.controller) {
+      await new Promise<void>((res) => navigator.serviceWorker.addEventListener("controllerchange", () => res(), { once: true }));
+    }
+  }
+  navigator.serviceWorker?.addEventListener("message", (e) => {
+    if (e.data?.type !== "pdo-fetch") return;
+    const port = e.ports[0];
+    if (!worker || !ready) return port.postMessage({ error: "Open a .obj file on the run page to see it here." });
+    const id = nextId++;
+    waiting.set(id, (m) => {
+      if (m.type === "response") port.postMessage(m.res, [m.res.body.buffer]);
+      else port.postMessage({ status: 500, headers: [["content-type", "text/plain; charset=utf-8"]], body: new TextEncoder().encode(m.error ?? "failed") });
+    });
+    const req = e.data.req;
+    worker.postMessage({ type: "fetch", id, req }, req.body ? [req.body.buffer] : []);
+  });
+
+  // ---------------------------------------------------------------- opening
+  async function open(bytes: Uint8Array, name: string, h: any = null) {
+    startStatus.textContent = `Opening ${name}…`;
+    try {
+      await serviceWorker();
+    } catch (e: any) {
+      startStatus.textContent = e.message;
+      return;
+    }
+    worker?.terminate();
+    ready = false; dirty = false; logs.length = 0; waiting.clear();
+    fileName = name; handle = h; canWrite = false;
+    if (handle?.queryPermission) canWrite = (await handle.queryPermission({ mode: "readwrite" })) === "granted";
+    worker = new Worker(new URL("../runtime/worker.ts", import.meta.url), { type: "module" });
+    worker.onerror = (e) => { startStatus.textContent = `The runtime failed to start: ${e.message}`; };
+    worker.onmessage = (e) => {
+      const m = e.data;
+      if (m.type === "opened") {
+        ready = true;
+        show(m.info);
+        $("start").hidden = true;
+        $("app").hidden = false;
+        startStatus.textContent = "";
+        frame.src = "/";
+        renderSave();
+      } else if (m.type === "open-failed") {
+        startStatus.textContent = `Could not open ${name}: ${m.error.split("\n")[0]}`;
+        worker?.terminate(); worker = null;
+      } else if (m.type === "info") show(m.info);
+      else if (m.type === "dirty") { dirty = m.dirty; renderSave(); if (dirty && handle && canWrite) scheduleSave(); }
+      else if (m.type === "log") log(m.level, m.message);
+      else if (m.type === "response" || m.type === "exported" || m.type === "failed") { waiting.get(m.id)?.(m); waiting.delete(m.id); }
+    };
+    worker.postMessage({ type: "open", bytes }, [bytes.buffer]);
+  }
+
+  function show(info: Info) {
+    $("obj-name").textContent = fileName;
+    $("obj-class").textContent = `class ${info.class}`;
+    const err = $("load-error");
+    err.hidden = !info.loadError;
+    err.textContent = info.loadError ? `The object's code did not load, so only its static files are served.\n${info.loadError}` : "";
+    const rows = info.tables.reduce((n, t) => n + t.rows, 0);
+    $("summary").textContent = `${info.tables.length} tables, ${rows.toLocaleString()} rows, ${info.files.length + info.public.length} files`;
+    const alarm = info.nextAlarm == null ? "none" : new Date(info.nextAlarm).toLocaleString();
+    const facts: [string, string][] = [
+      ["Object", info.name], ["Class", info.class],
+      ["Live check-in", `${info.checkin.slice(0, 12)} (${info.message})`], ["Check-ins", String(info.checkins)],
+      ["Code files", String(info.files.length)], ["Static files", String(info.public.length)],
+      ["Key-value keys", String(info.kvKeys)], ["Recorded changes", String(info.changesets)], ["Next alarm", alarm],
+    ];
+    $("facts").replaceChildren(...facts.flatMap(([k, v]) => {
+      const dt = document.createElement("dt"), dd = document.createElement("dd");
+      dt.textContent = k; dd.textContent = v;
+      return [dt, dd];
+    }));
+    $("tables").replaceChildren(...(info.tables.length ? info.tables : [{ name: "(no data tables)", rows: 0 }]).map((t) => {
+      const tr = document.createElement("tr"), a = document.createElement("td"), b = document.createElement("td");
+      a.textContent = t.name; a.className = "mono"; b.textContent = t.rows.toLocaleString(); b.className = "num";
+      tr.append(a, b);
+      return tr;
+    }));
+  }
+
+  function log(level: string, message: string) {
+    logs.push(`${new Date().toLocaleTimeString()} ${level === "log" ? "" : level + ": "}${message}`);
+    if (logs.length > 200) logs.shift();
+    $("logs").textContent = logs.join("\n");
+  }
+
+  // ---------------------------------------------------------------- saving
+  function exportBytes(): Promise<Uint8Array> {
+    return new Promise((res, rej) => {
+      if (!worker || !ready) return rej(new Error("no object is open"));
+      const id = nextId++;
+      waiting.set(id, (m) => (m.type === "exported" ? res(m.bytes) : rej(new Error(m.error))));
+      worker.postMessage({ type: "export", id });
+    });
+  }
+  function renderSave() {
+    $("save").hidden = !handle;
+    if (handle && canWrite) saveStatus.textContent = dirty ? "Saving…" : `Saved to ${fileName}`;
+    else if (dirty) saveStatus.textContent = handle ? "Unsaved changes" : "Unsaved changes: download to keep them";
+    else saveStatus.textContent = handle ? "" : "Changes stay in this tab until you download";
+  }
+  function scheduleSave() {
+    clearTimeout(saveTimer);
+    saveTimer = setTimeout(() => save(false), 700);
+  }
+  async function save(fromClick: boolean) {
+    if (!handle) return;
+    try {
+      if (!canWrite && fromClick) canWrite = (await handle.requestPermission({ mode: "readwrite" })) === "granted";
+      if (!canWrite) return renderSave();
+      const bytes = await exportBytes();
+      const w = await handle.createWritable();
+      await w.write(bytes);
+      await w.close();
+      dirty = false;
+      renderSave();
+    } catch (e: any) {
+      saveStatus.textContent = `Could not save: ${e.message}`;
+    }
+  }
+  async function download() {
+    const bytes = await exportBytes();
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(new Blob([bytes], { type: "application/octet-stream" }));
+    a.download = fileName;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+    if (!handle) { dirty = false; renderSave(); }
+  }
+  addEventListener("beforeunload", (e) => { if (dirty && !(handle && canWrite)) e.preventDefault(); });
+
+  // ---------------------------------------------------------------- controls
+  $("pick").onclick = async () => {
+    const picker = (window as any).showOpenFilePicker;
+    if (!picker) return $("file").click();
+    try {
+      const [h] = await picker({ types: [{ description: "Portable object", accept: { "application/octet-stream": [".obj", ".preview"] } }] });
+      const f = await h.getFile();
+      await open(new Uint8Array(await f.arrayBuffer()), f.name, h);
+    } catch (e: any) {
+      if (e.name !== "AbortError") startStatus.textContent = e.message;
+    }
+  };
+  $<HTMLInputElement>("file").onchange = async (e) => {
+    const f = (e.target as HTMLInputElement).files?.[0];
+    if (f) await open(new Uint8Array(await f.arrayBuffer()), f.name);
+  };
+  $("example").onclick = async () => {
+    startStatus.textContent = "Fetching the example…";
+    const r = await fetch("/examples/todo.obj");
+    if (!r.ok) return void (startStatus.textContent = "The example is not available.");
+    await open(new Uint8Array(await r.arrayBuffer()), "todo.obj");
+  };
+  const drop = $("drop");
+  for (const ev of ["dragenter", "dragover"]) addEventListener(ev, (e) => { e.preventDefault(); drop.classList.add("over"); });
+  for (const ev of ["dragleave", "drop"]) addEventListener(ev, (e) => { e.preventDefault(); drop.classList.remove("over"); });
+  addEventListener("drop", async (e) => {
+    const item = (e as DragEvent).dataTransfer?.items?.[0];
+    if (!item) return;
+    const h = await (item as any).getAsFileSystemHandle?.().catch(() => null);
+    const f: File | null = h?.kind === "file" ? await h.getFile() : item.getAsFile();
+    if (f) await open(new Uint8Array(await f.arrayBuffer()), f.name, h?.kind === "file" ? h : null);
+  });
+
+  $("save").onclick = () => save(true);
+  $("download").onclick = () => download();
+  $("close").onclick = () => {
+    if (dirty && !(handle && canWrite) && !confirm("Close without downloading your changes?")) return;
+    worker?.terminate(); worker = null; ready = false; dirty = false;
+    frame.src = "about:blank";
+    $("app").hidden = true;
+    $("start").hidden = false;
+  };
+  $("reload").onclick = () => frame.contentWindow?.location.reload();
+  $("back").onclick = () => frame.contentWindow?.history.back();
+  $<HTMLFormElement>("go").onsubmit = (e) => {
+    e.preventDefault();
+    const p = pathInput.value.trim();
+    frame.src = p.startsWith("/") ? p : "/" + p;
+  };
+  frame.addEventListener("load", () => {
+    try {
+      const l = frame.contentWindow!.location;
+      if (l.href !== "about:blank") pathInput.value = l.pathname + l.search;
+    } catch {}
+  });
+</script>
+
+<style is:global>
+  /* Global and nested under .run: several elements are created by script, which scoped styles would miss. */
+  .run {
+  padding-block: clamp(1.5rem, 4vw, 3rem);
+  section { border: 0; padding: 0; margin: 0; }
+  [hidden] { display: none !important; }
+  .start { max-width: 46rem; }
+  h1 { font-size: clamp(1.7rem, 1.2rem + 2.2vw, 2.6rem); letter-spacing: -0.02em; line-height: 1.1; }
+  .drop { border: 2px dashed var(--line); border-radius: 12px; padding: 1.5rem; background: var(--card); display: grid; gap: 0.75rem; justify-items: start; }
+  .drop.over { border-color: var(--amber); background: var(--amber-soft); }
+  .drop p { margin: 0; }
+  .row { display: flex; flex-wrap: wrap; gap: 0.5rem; }
+  .btn { font: inherit; padding: 0.45rem 0.9rem; border: 1px solid var(--line); border-radius: 8px; background: var(--card); color: var(--ink); cursor: pointer; }
+  .btn:hover { border-color: var(--ink-2); }
+  .btn.primary { background: var(--ink); color: var(--page); border-color: var(--ink); }
+  .notes { color: var(--ink-2); padding-left: 1.1rem; display: grid; gap: 0.35rem; }
+  .small { font-size: 0.875rem; color: var(--ink-2); }
+
+  .app { display: grid; gap: 0.75rem; }
+  .bar { display: grid; grid-template-columns: auto minmax(12rem, 1fr) auto; gap: 0.75rem; align-items: center; }
+  .who { display: grid; }
+  .addr { display: flex; gap: 0.35rem; align-items: center; min-width: 0; }
+  .addr form { flex: 1; min-width: 0; }
+  .addr input { width: 100%; font-size: 0.9rem; padding: 0.45rem 0.7rem; border: 1px solid var(--line); border-radius: 8px; background: var(--card); color: var(--ink); }
+  .icon { font: inherit; width: 2.2rem; height: 2.2rem; border: 1px solid var(--line); border-radius: 8px; background: var(--card); color: var(--ink); cursor: pointer; }
+  .acts { display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center; justify-content: flex-end; }
+  iframe { width: 100%; height: max(24rem, calc(100vh - 15rem)); border: 1px solid var(--line); border-radius: 10px; background: #fff; }
+  .error { white-space: pre-wrap; margin: 0; padding: 0.75rem 1rem; border: 1px solid var(--amber); border-radius: 8px; background: var(--amber-soft); font-size: 0.8rem; max-height: 12rem; overflow: auto; }
+  .panel { border: 1px solid var(--line); border-radius: 10px; background: var(--card); padding: 0.6rem 1rem; }
+  .panel summary { cursor: pointer; font-weight: 600; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(16rem, 1fr)); gap: 1.25rem; padding-top: 0.9rem; }
+  .grid h2 { font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--ink-2); margin: 0 0 0.4rem; }
+  dl { display: grid; grid-template-columns: auto 1fr; gap: 0.25rem 1rem; margin: 0; font-size: 0.9rem; }
+  dt { color: var(--ink-2); }
+  dd { margin: 0; overflow-wrap: anywhere; }
+  table { border-collapse: collapse; width: 100%; font-size: 0.9rem; }
+  td { padding: 0.15rem 0; }
+  .num { text-align: right; font-variant-numeric: tabular-nums; }
+  .logs { margin: 0; font-size: 0.78rem; max-height: 14rem; overflow: auto; white-space: pre-wrap; color: var(--ink-2); }
+  @media (max-width: 760px) {
+    .bar { grid-template-columns: 1fr; }
+    .acts { justify-content: flex-start; }
+    iframe { height: 65vh; }
+  }
+  }
+</style>

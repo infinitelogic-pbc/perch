@@ -18,4 +18,10 @@ export default defineConfig({
   site: `https://pdo.${baseDomain}`,
   trailingSlash: 'never',
   build: { format: 'file' },
+  vite: {
+    // The browser runtime imports pdo's own js/bootstrap.js from the crate.
+    server: { fs: { allow: ['..'] } },
+    worker: { format: 'es' },
+    optimizeDeps: { exclude: ['@sqlite.org/sqlite-wasm'] },
+  },
 });

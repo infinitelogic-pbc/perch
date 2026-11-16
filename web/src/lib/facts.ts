@@ -46,7 +46,7 @@ export const RESERVED: Table[] = [
     columns: 'key, value',
     holds: 'ctx.storage.get / put',
     detail:
-      'The key-value half of storage. Values are V8-serialized, so anything structuredClone accepts round-trips.',
+      'The key-value half of storage. Values are UTF-8 JSON that any runtime can read; Date, Map, Set, bytes, bigint and the rest are tagged with $pdo, so what structuredClone accepts round-trips (cycles are refused).',
   },
   {
     name: '_obj_alarms',

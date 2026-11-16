@@ -20,6 +20,18 @@
       return String(v);
     }
   }
+  function toU8(b) {
+    if (b instanceof Uint8Array) return b;
+    if (ArrayBuffer.isView(b)) return new Uint8Array(b.buffer, b.byteOffset, b.byteLength);
+    if (b instanceof ArrayBuffer) return new Uint8Array(b);
+    throw new TypeError("expected bytes");
+  }
+
+  // In a browser (the pdo web runtime) Request, Response, URL, timers and the
+  // rest are native, so only ctx.storage and the dispatcher below are needed.
+  const NATIVE = globalThis.__pdoNativeGlobals === true;
+
+  function installGlobals() {
   const log = (level) => (...args) => ops.op_log(level, args.map(show).join(" "));
   globalThis.console = {
     log: log("log"), info: log("info"), debug: log("debug"), warn: log("warn"), error: log("error"),
@@ -47,13 +59,6 @@
   }
   globalThis.TextEncoder = TextEncoder;
   globalThis.TextDecoder = TextDecoder;
-
-  function toU8(b) {
-    if (b instanceof Uint8Array) return b;
-    if (ArrayBuffer.isView(b)) return new Uint8Array(b.buffer, b.byteOffset, b.byteLength);
-    if (b instanceof ArrayBuffer) return new Uint8Array(b);
-    throw new TypeError("expected bytes");
-  }
 
   const B64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
   globalThis.btoa = (s) => {
@@ -247,6 +252,94 @@
   globalThis.fetch = async () => {
     throw new Error("outbound fetch is not available in pdo v0 (bindings, including an allowlisted fetch, come later)");
   };
+  } // installGlobals
+  if (!NATIVE) installGlobals();
+
+  // ------------------------------------------------------------ KV value encoding
+  // Values in _obj_kv are UTF-8 JSON, readable by any runtime (native V8, a
+  // browser, Cloudflare tooling). Plain JSON values are stored as they are;
+  // everything else structured clone can carry is tagged with "$pdo". Shared
+  // references are stored once per use, and cycles are refused.
+  const TYPED = ["Uint8Array", "Int8Array", "Uint8ClampedArray", "Int16Array", "Uint16Array", "Int32Array", "Uint32Array", "Float32Array", "Float64Array", "BigInt64Array", "BigUint64Array", "DataView"];
+  function b64(u8) {
+    let s = "";
+    for (let i = 0; i < u8.length; i += 0x8000) s += String.fromCharCode.apply(null, u8.subarray(i, i + 0x8000));
+    return btoa(s);
+  }
+  function unb64(s) {
+    const bin = atob(s);
+    const u8 = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i);
+    return u8;
+  }
+  function kvTag(v, seen) {
+    if (v === null || typeof v === "boolean" || typeof v === "string") return v;
+    if (typeof v === "number") {
+      if (Number.isFinite(v) && !Object.is(v, -0)) return v;
+      return { $pdo: "number", v: Object.is(v, -0) ? "-0" : String(v) };
+    }
+    if (v === undefined) return { $pdo: "undefined" };
+    if (typeof v === "bigint") return { $pdo: "bigint", v: v.toString() };
+    if (typeof v === "function" || typeof v === "symbol") throw new TypeError(`cannot store a ${typeof v} in key-value storage`);
+    if (seen.includes(v)) throw new TypeError("cannot store a value that contains itself in key-value storage");
+    seen.push(v);
+    let out;
+    if (v instanceof Date) out = { $pdo: "date", v: Number.isNaN(v.getTime()) ? null : v.getTime() };
+    else if (v instanceof ArrayBuffer) out = { $pdo: "bytes", t: "ArrayBuffer", v: b64(new Uint8Array(v)) };
+    else if (ArrayBuffer.isView(v)) {
+      const t = TYPED.find((n) => typeof globalThis[n] === "function" && v instanceof globalThis[n]) || "Uint8Array";
+      out = { $pdo: "bytes", t, v: b64(new Uint8Array(v.buffer, v.byteOffset, v.byteLength)) };
+    } else if (v instanceof Map) out = { $pdo: "map", v: [...v].map(([k, x]) => [kvTag(k, seen), kvTag(x, seen)]) };
+    else if (v instanceof Set) out = { $pdo: "set", v: [...v].map((x) => kvTag(x, seen)) };
+    else if (v instanceof RegExp) out = { $pdo: "regexp", v: [v.source, v.flags] };
+    else if (v instanceof Error) out = { $pdo: "error", v: { name: v.name, message: v.message, stack: v.stack } };
+    else if (Array.isArray(v)) out = Array.from(v, (x) => kvTag(x, seen));
+    else {
+      const o = {};
+      for (const k of Object.keys(v)) o[k] = kvTag(v[k], seen);
+      out = Object.prototype.hasOwnProperty.call(v, "$pdo") ? { $pdo: "object", v: o } : o;
+    }
+    seen.pop();
+    return out;
+  }
+  function kvUntag(v) {
+    if (v === null || typeof v !== "object") return v;
+    if (Array.isArray(v)) return v.map(kvUntag);
+    if (typeof v.$pdo !== "string") {
+      const o = {};
+      for (const k of Object.keys(v)) o[k] = kvUntag(v[k]);
+      return o;
+    }
+    switch (v.$pdo) {
+      case "number": return v.v === "-0" ? -0 : Number(v.v);
+      case "undefined": return undefined;
+      case "bigint": return BigInt(v.v);
+      case "date": return new Date(v.v === null ? NaN : v.v);
+      case "bytes": {
+        const u8 = unb64(v.v);
+        if (v.t === "ArrayBuffer") return u8.buffer;
+        if (v.t === "Uint8Array" || typeof globalThis[v.t] !== "function") return u8;
+        if (v.t === "DataView") return new DataView(u8.buffer);
+        return new globalThis[v.t](u8.buffer, 0, u8.byteLength / globalThis[v.t].BYTES_PER_ELEMENT);
+      }
+      case "map": return new Map(v.v.map(([k, x]) => [kvUntag(k), kvUntag(x)]));
+      case "set": return new Set(v.v.map(kvUntag));
+      case "regexp": return new RegExp(v.v[0], v.v[1]);
+      case "error": { const e = new Error(v.v.message); e.name = v.v.name; e.stack = v.v.stack; return e; }
+      case "object": { const o = {}; for (const k of Object.keys(v.v)) o[k] = kvUntag(v.v[k]); return o; }
+      default: throw new Error(`unknown key-value type tag ${v.$pdo}; this file was written by a newer pdo`);
+    }
+  }
+  function kvEncode(v) { return core.encode(JSON.stringify(kvTag(v, []))); }
+  function kvDecode(bytes) {
+    // Files written before the portable encoding hold V8's own serialization
+    // (first byte 0xFF). The native runtime still reads those; others cannot.
+    if (bytes.length && bytes[0] === 0xff) {
+      if (typeof core.deserialize === "function") return core.deserialize(bytes);
+      throw new Error("this value was stored by an older pdo in a V8-only format; open the object once with the pdo binary and write the key again to convert it");
+    }
+    return kvUntag(JSON.parse(core.decode(bytes)));
+  }
 
   // ------------------------------------------------------------ storage
   function bind(v) {
@@ -313,18 +406,18 @@
     async get(k) {
       if (Array.isArray(k)) {
         const m = new Map();
-        for (const key of k) { const b = ops.op_kv_get(String(key)); if (b != null) m.set(key, core.deserialize(b)); }
+        for (const key of k) { const b = ops.op_kv_get(String(key)); if (b != null) m.set(key, kvDecode(b)); }
         return m;
       }
       const b = ops.op_kv_get(String(k));
-      return b == null ? undefined : core.deserialize(b);
+      return b == null ? undefined : kvDecode(b);
     },
     async put(k, v) {
       if (k !== null && typeof k === "object") {
-        for (const key of Object.keys(k)) ops.op_kv_put(key, core.serialize(k[key]));
+        for (const key of Object.keys(k)) ops.op_kv_put(key, kvEncode(k[key]));
         return;
       }
-      ops.op_kv_put(String(k), core.serialize(v));
+      ops.op_kv_put(String(k), kvEncode(v));
     },
     async delete(k) {
       if (Array.isArray(k)) { let n = 0; for (const key of k) if (ops.op_kv_delete(String(key))) n++; return n; }
@@ -332,7 +425,7 @@
     },
     async list(opts = {}) {
       const m = new Map();
-      for (const [k, b] of ops.op_kv_list(opts)) m.set(k, core.deserialize(b));
+      for (const [k, b] of ops.op_kv_list(opts)) m.set(k, kvDecode(b));
       return m;
     },
     async deleteAll() { ops.op_kv_delete_all(); },
@@ -413,7 +506,7 @@
         const req = new Request(ev.url, { method: ev.method, headers: ev.headers, body: ev.method === "GET" || ev.method === "HEAD" ? null : body });
         const res = await obj.fetch(req);
         if (!(res instanceof Response)) throw new TypeError("fetch() must return a Response");
-        return { meta: { status: res.status, headers: [...res.headers] }, body: res._bytes || EMPTY };
+        return { meta: { status: res.status, headers: [...res.headers] }, body: NATIVE ? new Uint8Array(await res.arrayBuffer()) : res._bytes || EMPTY };
       }
       case "rpc": {
         const obj = state.instance;
