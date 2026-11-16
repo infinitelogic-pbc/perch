@@ -32,7 +32,7 @@ function sh(args: string[]): any {
 }
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-const browser = await puppeteer.launch({ executablePath: CHROME, headless: true, args: ["--no-first-run"] });
+const browser = await puppeteer.launch({ executablePath: CHROME, headless: true, args: ["--no-first-run", ...(process.env.CHROME_ARGS ? process.env.CHROME_ARGS.split(",") : [])] });
 const page = await browser.newPage();
 const errors: string[] = [];
 page.on("pageerror", (e) => errors.push(String(e)));
