@@ -13,7 +13,7 @@ const PROTOCOL_VERSIONS: &[&str] = &["2025-11-25", "2025-06-18", "2025-03-26", "
 
 pub const GUIDE: &str = r#"This server edits one portable durable object: a single SQLite file holding a Cloudflare-style Durable Object's code, history and data.
 
-Workflow: describe_object → read_code → propose_change (code + migrations, applied to a preview copy and built there) → test_call (against the preview) → release_change (runs the migrations on the live file and moves the live check-in). rollback_code moves code back if it still fits the schema. call_object hits the live object.
+Workflow: describe_object → read_code → propose_change (code + tests + migrations, applied to a preview copy, built there, stored tests run) → test_call (try it against the preview) → release_change (refused if tests fail; runs the migrations on the live file and moves the live check-in). rollback_code moves code back if it still fits the schema. undo_changes reverses recent data changes. call_object hits the live object.
 
 Writing the object:
 - The entry file is src/index.ts. It exports the object's class (the name describe_object reports) extending DurableObject from "cloudflare:workers". Constructor signature is (ctx, env); call super(ctx, env).
@@ -22,6 +22,19 @@ Writing the object:
 - Schema changes go ONLY in propose_change migrations (ordered, forward-only SQL). Object code cannot CREATE/ALTER/DROP, and cannot touch _obj_* tables.
 - Data tables need a declared PRIMARY KEY; use UUIDv7 TEXT keys (crypto.randomUUID() is v4; build v7 from Date.now() + crypto.getRandomValues) rather than INTEGER/AUTOINCREMENT so copies of the file can merge changesets later.
 - Web pages: files under public/ are static and served before fetch() without waking the object (public/index.html at /, public/about.html at /about, public/docs/index.html at /docs/; /about.html redirects to /about; GET/HEAD only; ETag + 304). Unmatched requests go to fetch(). Binary files (images, fonts) are { "base64": "..." } in propose_change. Templates for dynamic pages can be imported as strings: import page from "./page.html" (also .txt .sql .css .md .svg). The same layout exports to Cloudflare Static Assets unchanged.
+- Editing: after the first version, change files with propose_change `edits` (exact old/new string replacement) instead of resending whole files.
+- Tests: put tests in test/*.ts. They run on every propose_change and release_change refuses while any fail. Each test gets a fresh, empty copy of the object:
+    import { test, expect } from "pdo:test";
+    test("adds an item", async (obj) => {
+      const res = await obj.fetch("/todos", { body: { title: "milk" } });   // object body = JSON POST
+      expect(res.status).toBe(201);
+      expect(await obj.rpc("count")).toEqual({ open: 1, done: 0 });
+      obj.clock.advance(8 * 24 * 3600 * 1000);   // Date.now() follows the test clock
+      await obj.alarm();
+      expect(obj.sql("SELECT count(*) AS n FROM todos")[0].n).toBe(0);
+    });
+  obj has fetch(path, init), rpc(method, ...args), alarm(), sql(query, ...bindings) for seeding and assertions, storage, and clock.set/advance/now. expect has toBe, toEqual, toBeTruthy, toBeFalsy, toBeNull, toBeDefined, toContain, toHaveLength, toBeGreaterThan, toBeLessThan, toMatch, and .not. Write tests for the behavior the user asked for, so later changes cannot quietly break it.
+- Undo: every write is recorded. list_changes shows recent data changes; undo_changes reverses them (not across a migration).
 - Available globals: Request, Response, Headers, URL, URLSearchParams, TextEncoder/TextDecoder, crypto.randomUUID/getRandomValues, setTimeout, structuredClone, atob/btoa, console (logs come back in test_call). Not yet: outbound fetch, WebSockets, env bindings, npm imports (relative imports between files in the object work).
 - Keep the class Cloudflare-compatible: the same source deploys unchanged with `pdo export` + wrangler."#;
 
@@ -91,6 +104,12 @@ fn tools_list() -> Value {
                     { "type": "object", "properties": { "base64": { "type": "string" } }, "required": ["base64"], "description": "binary contents (images, fonts) for public/" },
                     { "type": "null", "description": "delete the file" }
                 ] }, "description": "path -> full file contents. Code lives under src/; files under public/ are served as-is at the matching URL path." },
+                "edits": { "type": "array", "description": "exact-string replacements in existing text files, applied after `files`. Prefer these over resending a whole file.", "items": { "type": "object", "properties": {
+                    "path": { "type": "string" },
+                    "old": { "type": "string", "description": "text to replace; must match exactly and occur once (unless replace_all)" },
+                    "new": { "type": "string" },
+                    "replace_all": { "type": "boolean", "default": false }
+                }, "required": ["path", "old", "new"] } },
                 "migrations": { "type": "array", "items": { "type": "object", "properties": {
                     "name": { "type": "string" }, "sql": { "type": "string" }
                 }, "required": ["name", "sql"] } },
@@ -104,6 +123,33 @@ fn tools_list() -> Value {
             "description": "Call fetch, an RPC method or the alarm on the preview copy and return the result, console logs, the rows each table gained, changed or lost, and the preview's next alarm afterwards. Writes land in the preview only. An alarm run here clears the pending alarm unless the handler rescheduled it.",
             "inputSchema": call_schema.clone(),
             "annotations": { "title": "Test call (preview)", "readOnlyHint": false, "destructiveHint": false, "idempotentHint": false, "openWorldHint": false }
+        },
+        {
+            "name": "run_tests",
+            "title": "Run stored tests",
+            "description": "Run the object's test/*.ts files. Each test gets its own fresh, empty copy of the object (same code, all migrations, no data) and a controllable clock, so results never depend on live data. Runs the preview's tests when a preview exists, else live's. propose_change runs these automatically and release_change refuses while any fail.",
+            "inputSchema": { "type": "object", "properties": {
+                "target": { "type": "string", "enum": ["preview", "live"], "description": "default: preview if one exists, else live" }
+            } },
+            "annotations": { "title": "Run stored tests", "readOnlyHint": true, "idempotentHint": true, "openWorldHint": false }
+        },
+        {
+            "name": "list_changes",
+            "title": "List data changes",
+            "description": "Recent data changes on the live object, newest first: which event made each (fetch, rpc, alarm, migration, undo), when, and rows inserted, updated and deleted per table. Shows which can be undone.",
+            "inputSchema": { "type": "object", "properties": {
+                "limit": { "type": "integer", "minimum": 1, "default": 20 }
+            } },
+            "annotations": { "title": "List data changes", "readOnlyHint": true, "idempotentHint": true, "openWorldHint": false }
+        },
+        {
+            "name": "undo_changes",
+            "title": "Undo data changes",
+            "description": "Reverse the live data change with this id and every newer one, in one transaction, restoring rows and KV values to what they were before. Refused across a migration. The undo is recorded as a change itself, so it can be undone.",
+            "inputSchema": { "type": "object", "properties": {
+                "back_to": { "type": "integer", "description": "id from list_changes; this change and all newer ones are reversed" }
+            }, "required": ["back_to"] },
+            "annotations": { "title": "Undo data changes", "readOnlyHint": false, "destructiveHint": true, "idempotentHint": false, "openWorldHint": false }
         },
         {
             "name": "release_change",
@@ -149,6 +195,12 @@ async fn call_tool(tools: &mut Tools, name: &str, args: Value) -> Result<Value> 
         }
         "propose_change" => tools.propose_change(serde_json::from_value::<ProposeArgs>(args)?).await,
         "test_call" => tools.test_call(serde_json::from_value::<CallArgs>(args)?).await,
+        "run_tests" => tools.run_tests(s("target").as_deref()).await,
+        "list_changes" => tools.list_changes(args.get("limit").and_then(|v| v.as_u64()).unwrap_or(20) as usize),
+        "undo_changes" => {
+            let id = args.get("back_to").and_then(|v| v.as_i64()).ok_or_else(|| anyhow::anyhow!("back_to is required"))?;
+            tools.undo_changes(id)
+        }
         "release_change" => tools.release_change(s("message")).await,
         "rollback_code" => {
             let c = s("checkin").ok_or_else(|| anyhow::anyhow!("checkin is required"))?;
@@ -206,7 +258,8 @@ pub async fn serve(path: PathBuf) -> Result<()> {
                 match call_tool(&mut tools, &name, args).await {
                     Ok(v) => {
                         let is_error = v.get("ok").and_then(|o| o.as_bool()) == Some(false)
-                            || v.pointer("/build/ok").and_then(|o| o.as_bool()) == Some(false);
+                            || v.pointer("/build/ok").and_then(|o| o.as_bool()) == Some(false)
+                            || v.pointer("/tests/ok").and_then(|o| o.as_bool()) == Some(false);
                         Ok(json!({
                             "content": [{ "type": "text", "text": serde_json::to_string_pretty(&v).unwrap() }],
                             "structuredContent": v,

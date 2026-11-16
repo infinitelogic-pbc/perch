@@ -66,7 +66,7 @@ const init = await mcp.rpc("initialize", { protocolVersion: "2025-06-18", capabi
 ok(init.result.instructions.includes("propose_change"), "initialize returns the agent guide");
 const list = await mcp.rpc("tools/list");
 const names = list.result.tools.map((t: any) => t.name);
-ok(names.length === 9, `nine tools (${names.join(", ")})`);
+ok(names.length === 12, `twelve tools (${names.join(", ")})`);
 ok(list.result.tools.every((t: any) => t.title && t.annotations), "every tool has a title and annotations");
 const ann = Object.fromEntries(list.result.tools.map((t: any) => [t.name, t.annotations]));
 ok(ann.describe_object.readOnlyHint && ann.query_data.readOnlyHint && ann.release_change.destructiveHint && ann.call_object.destructiveHint, "annotations match the plan");
@@ -329,6 +329,100 @@ const wr = JSON.parse(readFileSync(join(out, "wrangler.jsonc"), "utf8").replace(
 ok(wr.assets?.directory === "./public", "export maps public/ to assets.directory");
 ok(readFileSync(join(out, "public/logo.png")).equals(PNG) && readFileSync(join(out, "src/hello.html"), "utf8") === "<h1>dynamic</h1>", "export writes binary and text files unchanged");
 ok(wr.rules?.[0]?.globs?.includes("**/*.css"), "export adds text-import rules for .css/.md/.svg");
+
+// ------------------------------------------------------------------ edits, stored tests, undo, checkout/commit
+const gate = join(dir, "gate.obj");
+sh(["new", gate, "--class", "Todo", "--name", "todo"]);
+const m3 = new Mcp(gate);
+await m3.rpc("initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "e2e", version: "0" } });
+r = await m3.tool("propose_change", {
+  message: "to-do with stored tests",
+  files: {
+    "src/index.ts": src("src/index.ts"), "src/uuid.ts": src("src/uuid.ts"), "src/stats.html": src("src/stats.html"),
+    "test/todo.test.ts": src("test/todo.test.ts"),
+  },
+  migrations: [{ name: "0001_todos", sql: src("migrations/0001_todos.sql") }],
+});
+ok(r.v.build.ok && r.v.tests.ok && r.v.tests.total === 7, "propose_change runs the stored tests (7 pass)");
+
+// An edit that breaks behavior: caught by the tests, release refused.
+r = await m3.tool("propose_change", {
+  message: "oops: wrong status",
+  edits: [{ path: "src/index.ts", old: "return Response.json(this.add(body.title), { status: 201 });", new: "return Response.json(this.add(body.title), { status: 200 });" }],
+});
+ok(r.v.build.ok && r.v.files_changed.includes("src/index.ts"), "an edit changes one line without resending the file");
+ok(r.isError && !r.v.tests.ok && r.v.tests.failed === 1 && r.v.tests.results.find((t: any) => !t.ok).error.includes("expected 200 to be 201"), "the stored test catches the regression, with the assertion message");
+r = await m3.tool("release_change", {});
+ok(r.isError && r.text.includes("stored tests fail") && r.text.includes("adds and lists an item"), "release_change refuses while a test fails");
+r = await m3.tool("propose_change", { message: "x", edits: [{ path: "src/index.ts", old: "this text is not in the file", new: "y" }] });
+ok(r.isError && r.text.includes("was not found"), "an edit whose old text is missing is refused");
+r = await m3.tool("propose_change", { message: "x", edits: [{ path: "src/index.ts", old: "this.ctx.storage", new: "y" }] });
+ok(r.isError && /occurs \d+ times/.test(r.text), "an ambiguous edit is refused");
+r = await m3.tool("propose_change", {
+  message: "fix status",
+  edits: [{ path: "src/index.ts", old: "{ status: 200 });", new: "{ status: 201 });" }],
+});
+ok(r.v.tests.ok, "fixing it with an edit makes the tests pass");
+r = await m3.tool("release_change", { message: "to-do with stored tests" });
+ok(!r.isError && r.v.released, "release goes through once tests pass");
+r = await m3.tool("run_tests", { target: "live" });
+ok(r.v.ok && r.v.passed === 7 && r.v.target === "live", "run_tests on live");
+r = await m3.tool("query_data", { sql: "SELECT count(*) FROM todos" });
+ok(r.v.rows[0][0] === 0, "tests ran on scratch copies: live has no rows");
+
+// Data undo.
+await m3.tool("call_object", { kind: "rpc", method: "add", args: ["keep me"] });
+await m3.tool("call_object", { kind: "rpc", method: "add", args: ["agent mistake"] });
+await m3.tool("call_object", { kind: "rpc", method: "setRetention", args: [5] });
+r = await m3.tool("list_changes", {});
+const ch = r.v.changes;
+ok(ch.length >= 3 && ch[0].event === "rpc" && ch[0].tables._obj_kv && ch[1].tables.todos.inserts === 1 && ch.every((c: any) => c.undoable), "list_changes shows events with rows per table");
+const firstAdd = ch[2].id;
+r = await m3.tool("undo_changes", { back_to: ch[1].id });
+ok(!r.isError && r.v.undone.length === 2 && r.v.tables.todos.deletes === 1, "undo_changes reverses the two newest changes");
+r = await m3.tool("query_data", { sql: "SELECT title FROM todos" });
+ok(r.v.rows.length === 1 && r.v.rows[0][0] === "keep me", "the mistaken row is gone, the earlier one stays");
+const redo = (await m3.tool("list_changes", {})).v.changes[0];
+ok(redo.event === "undo", "the undo is recorded as a change");
+r = await m3.tool("undo_changes", { back_to: redo.id });
+r = await m3.tool("query_data", { sql: "SELECT count(*) FROM todos" });
+ok(r.v.rows[0][0] === 2, "undoing the undo brings the row back");
+r = await m3.tool("call_object", { kind: "rpc", method: "stats" });
+ok(r.v.result.total === 2, "the live object sees the restored data");
+r = await m3.tool("propose_change", { message: "add notes", migrations: [{ name: "0002_note", sql: "ALTER TABLE todos ADD COLUMN note TEXT" }] });
+r = await m3.tool("release_change", {});
+ok(!r.isError, "release a migration");
+r = await m3.tool("undo_changes", { back_to: firstAdd });
+ok(r.isError && r.text.includes("migration"), "undo is refused across a migration");
+m3.close();
+
+// Checkout, edit with ordinary tools, commit.
+function shFail(args: string[]): { code: number; out: any } {
+  const p = Bun.spawnSync([PDO, ...args], { stderr: "pipe" });
+  let out: any = null;
+  try { out = JSON.parse(p.stdout.toString()); } catch {}
+  return { code: p.exitCode, out };
+}
+const co = join(dir, "checkout");
+const cout = sh(["checkout", gate, co]);
+ok(cout.files.includes("test/todo.test.ts") && cout.migrations.length === 2 && existsSync(join(co, "migrations/0002_note.sql")), "pdo checkout writes files and applied migrations");
+const idx = join(co, "src/index.ts");
+await Bun.write(idx, readFileSync(idx, "utf8").replace('{ error: "title is required" }', '{ error: "a title is required" }'));
+await Bun.write(join(co, "public/hello.txt"), "hi");
+await Bun.write(join(co, "migrations/0003_priority.sql"), "ALTER TABLE todos ADD COLUMN priority INTEGER NOT NULL DEFAULT 0;\n");
+const c1 = sh(["commit", co, "-m", "clearer error, priority column"]);
+ok(c1.released && c1.tests.passed === 7 && c1.migrations_applied.includes("0003_priority"), "pdo commit builds, tests and releases");
+const dg = sh(["describe", gate]);
+ok(dg.live_checkin.message === "clearer error, priority column" && dg.tables[0].columns.some((c: any) => c.name === "priority") && dg.public.length === 1, "the commit is live: code, migration and static file");
+await Bun.write(idx, readFileSync(idx, "utf8").replace("{ status: 201 }", "{ status: 202 }"));
+const c2 = shFail(["commit", co, "-m", "break it"]);
+ok(c2.code === 1 && c2.out.released === false && c2.out.proposal.tests.failed === 1, "a commit that fails a test exits 1 and is not released");
+ok(sh(["describe", gate]).live_checkin.message === "clearer error, priority column", "live is unchanged after the failed commit");
+await Bun.write(idx, readFileSync(idx, "utf8").replace("{ status: 202 }", "{ status: 201 }"));
+await Bun.write(join(co, "public/hello.txt"), "hello");
+ok(sh(["commit", co, "-m", "second commit from the same checkout"]).released, "the same checkout can commit again");
+ok(shFail(["commit", co, "-m", "nothing"]).code !== 0, "a commit with no changes is refused");
+ok(sh(["test", gate]).passed === 7, "pdo test runs the stored tests from the CLI");
 
 console.log(`\n${passed} checks passed (${dir})`);
 process.exit(0);

@@ -63,16 +63,34 @@ ${RUNTIME.map((r) => `- ${r.api}: ${r.note}`).join('\n')}
 
 ## MCP (\`pdo mcp <file>\`, stdio, JSON-RPC 2.0, one message per line)
 
-Workflow: describe_object, read_code, propose_change (code + migrations on
-the preview), test_call (on the preview), release_change (live). rollback_code
-moves code back if it still fits the schema. call_object hits live.
+Workflow: describe_object, read_code, propose_change (code + tests +
+migrations on the preview; stored tests run), test_call (on the preview),
+release_change (live; refused while a stored test fails). rollback_code moves
+code back if it still fits the schema. undo_changes reverses recent data
+changes. call_object hits live.
 
 ${TOOLS.map((t) => `- \`${t.name}\` [${t.kind}]: ${t.does}`).join('\n')}
 
-Annotations: describe_object, read_code, list_checkins and query_data are
-readOnlyHint; release_change, rollback_code and call_object are
-destructiveHint. call_object takes kind fetch or rpc; test_call also takes
-kind alarm.
+Annotations: describe_object, read_code, list_checkins, query_data, run_tests
+and list_changes are readOnlyHint; release_change, rollback_code,
+undo_changes and call_object are destructiveHint. call_object takes kind
+fetch or rpc; test_call also takes kind alarm.
+
+Edits: propose_change takes \`edits: [{ path, old, new, replace_all? }]\`.
+\`old\` must match the file exactly and occur once. Use these after the first
+version, not whole files.
+
+Stored tests: files under \`test/\` that
+\`import { test, expect } from "pdo:test"\`. Each \`test(name, async (obj) => …)\`
+runs on its own fresh, empty copy of the object. \`obj\` has
+\`fetch(path, init)\` (an object body is a JSON POST), \`rpc(method, ...args)\`,
+\`alarm()\`, \`sql(query, ...bindings)\`, \`storage\`, and
+\`clock.set/advance/now\` (Date.now() follows it). \`expect\` has toBe, toEqual,
+toBeTruthy, toBeFalsy, toBeNull, toBeDefined, toContain, toHaveLength,
+toBeGreaterThan, toBeLessThan, toMatch and .not.
+
+Checkout: \`pdo checkout <file> <dir>\` writes plain files; \`pdo commit <dir>
+-m MSG\` brings them back through the same build-and-test gate.
 
 Example client config: \`claude mcp add todo -- pdo mcp todo.obj\`
 

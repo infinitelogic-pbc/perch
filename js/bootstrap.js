@@ -430,10 +430,111 @@
         await obj.alarm({ retryCount: ev.retryCount || 0, isRetry: (ev.retryCount || 0) > 0 });
         return { meta: {} };
       }
+      case "test_list":
+        return { meta: { tests: tests.map((t) => ({ file: t.file, name: t.name })) } };
+      case "test_run": {
+        const t = tests.find((x) => x.file === ev.file && x.name === ev.name);
+        if (!t) throw new Error(`no test ${JSON.stringify(ev.name)} in ${ev.file}`);
+        await t.fn(testObject(ev.objectName));
+        return { meta: {} };
+      }
       default:
         throw new Error(`unknown event ${ev.kind}`);
     }
   }
+
+  // ------------------------------------------------------------ tests (pdo:test)
+  // Test files register with test(name, fn). Each test runs in its own event
+  // against a fresh, empty copy of the object, driving the real class instance.
+  const tests = [];
+  let testFile = null;
+  let clockOffset = 0;
+  const RealDate = Date;
+
+  function installClock() {
+    if (globalThis.Date !== RealDate) return;
+    class TestDate extends RealDate {
+      constructor(...a) { if (a.length === 0) super(RealDate.now() + clockOffset); else super(...a); }
+      static now() { return RealDate.now() + clockOffset; }
+    }
+    globalThis.Date = TestDate;
+  }
+
+  function testObject(name) {
+    const inst = () => state.instance;
+    return {
+      /** Call the class's fetch(). A plain object body is sent as JSON. */
+      async fetch(path, init = {}) {
+        const headers = new Headers(init.headers);
+        let body = init.body;
+        if (body != null && typeof body === "object" && !(body instanceof ArrayBuffer) && !ArrayBuffer.isView(body) && !(body instanceof URLSearchParams)) {
+          body = JSON.stringify(body);
+          if (!headers.has("content-type")) headers.set("content-type", "application/json");
+        }
+        const method = String(init.method || (body != null ? "POST" : "GET")).toUpperCase();
+        if (typeof inst().fetch !== "function") return new Response("Not found", { status: 404 });
+        const url = /^https?:/.test(path) ? path : `http://${name}.pdo.local${path}`;
+        return await inst().fetch(new Request(url, { method, headers, body: method === "GET" || method === "HEAD" ? null : body }));
+      },
+      /** Call a public method, with the same rules and JSON round trip as RPC. */
+      async rpc(method, ...args) {
+        const obj = inst();
+        const m = String(method);
+        if (NOT_RPC.has(m) || m.startsWith("_") || m in Object.prototype || typeof obj[m] !== "function") {
+          throw new Error(`${m} is not a public RPC method on this class`);
+        }
+        const r = await obj[m](...args);
+        return r === undefined ? null : JSON.parse(JSON.stringify(r));
+      },
+      /** Run alarm() now. */
+      async alarm() {
+        if (typeof inst().alarm !== "function") throw new Error("this class has no alarm() handler");
+        await inst().alarm({ retryCount: 0, isRetry: false });
+      },
+      /** SQL over the data tables, for seeding and assertions. Returns rows. */
+      sql(query, ...bindings) { return sql.exec(query, ...bindings).toArray(); },
+      storage,
+      /** The object's clock: Date.now() and new Date() follow it. */
+      clock: {
+        now: () => Date.now(),
+        set(ms) { clockOffset = (ms instanceof RealDate ? ms.getTime() : Number(ms)) - RealDate.now(); },
+        advance(ms) { clockOffset += Number(ms); },
+      },
+    };
+  }
+
+  function expect(actual) {
+    const make = (neg) => {
+      const check = (pass, what) => {
+        if (neg ? pass : !pass) throw new Error(`expected ${show(actual)} ${neg ? "not " : ""}${what}`);
+      };
+      return {
+        toBe(e) { check(Object.is(actual, e), `to be ${show(e)}`); },
+        toEqual(e) { check(JSON.stringify(actual) === JSON.stringify(e), `to equal ${show(e)}`); },
+        toBeTruthy() { check(!!actual, "to be truthy"); },
+        toBeFalsy() { check(!actual, "to be falsy"); },
+        toBeNull() { check(actual === null, "to be null"); },
+        toBeDefined() { check(actual !== undefined, "to be defined"); },
+        toBeUndefined() { check(actual === undefined, "to be undefined"); },
+        toContain(e) { check(actual != null && typeof actual.includes === "function" && actual.includes(e), `to contain ${show(e)}`); },
+        toHaveLength(n) { check(actual != null && actual.length === n, `to have length ${n}`); },
+        toBeGreaterThan(n) { check(actual > n, `to be greater than ${show(n)}`); },
+        toBeLessThan(n) { check(actual < n, `to be less than ${show(n)}`); },
+        toMatch(re) { check(typeof actual === "string" && (re instanceof RegExp ? re.test(actual) : actual.includes(re)), `to match ${re}`); },
+      };
+    };
+    const e = make(false);
+    e.not = make(true);
+    return e;
+  }
+
+  const testApi = {
+    test(name, fn) {
+      if (typeof fn !== "function") throw new TypeError("test(name, fn) needs a function");
+      tests.push({ file: testFile, name: String(name), fn });
+    },
+    expect,
+  };
 
   async function settle(list) {
     while (list.length) {
@@ -448,6 +549,8 @@
     RpcTarget,
     env: state.env,
     setModule(m) { state.mod = m; },
+    testApi,
+    beginTestFile(f) { testFile = f; installClock(); },
     dispatch(id, ev) {
       run(id, ev).then(
         async (out) => {

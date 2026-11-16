@@ -11,7 +11,7 @@ mod store;
 mod tools;
 
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
@@ -90,6 +90,31 @@ enum Cmd {
         #[arg(long)]
         worker_name: Option<String>,
     },
+    /// Run the object's stored tests (test/*.ts), each on a fresh empty copy
+    Test { file: PathBuf },
+    /// List recent data changes on the live object
+    Changes {
+        file: PathBuf,
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+    },
+    /// Reverse the data change with this id and every newer one
+    Undo { file: PathBuf, back_to: i64 },
+    /// Write the live check-in as plain files to edit with your own tools
+    Checkout { file: PathBuf, dir: PathBuf },
+    /// Bring a checkout back: build, run tests, release
+    Commit {
+        dir: PathBuf,
+        /// What changed
+        #[arg(short, long)]
+        message: String,
+        /// Object file (default: the one this directory was checked out from)
+        #[arg(long)]
+        file: Option<PathBuf>,
+        /// Stop after building and testing on the preview
+        #[arg(long)]
+        no_release: bool,
+    },
 }
 
 fn pascal(s: &str) -> String {
@@ -109,20 +134,6 @@ fn starter(class: &str) -> String {
 export class {class} extends DurableObject {{}}
 "#
     )
-}
-
-fn read_dir_files(root: &Path, dir: &Path, out: &mut BTreeMap<String, Vec<u8>>) -> Result<()> {
-    for e in std::fs::read_dir(dir)? {
-        let e = e?;
-        let p = e.path();
-        if p.is_dir() {
-            read_dir_files(root, &p, out)?;
-        } else {
-            let rel = p.strip_prefix(root)?.to_string_lossy().replace('\\', "/");
-            out.insert(rel, std::fs::read(&p).with_context(|| format!("reading {}", p.display()))?);
-        }
-    }
-    Ok(())
 }
 
 fn print(v: &Value) {
@@ -152,10 +163,11 @@ fn main() -> Result<()> {
                 if !src.is_dir() {
                     bail!("{} has no src/ directory", dir.display());
                 }
-                read_dir_files(&dir, &src, &mut files)?;
-                let public = dir.join("public");
-                if public.is_dir() {
-                    read_dir_files(&dir, &public, &mut files)?;
+                for sub in tools::OBJECT_DIRS {
+                    let d = dir.join(sub);
+                    if d.is_dir() {
+                        tools::read_dir_bytes(&dir, &d, &mut files)?;
+                    }
                 }
                 let mdir = dir.join("migrations");
                 if mdir.is_dir() {
@@ -207,6 +219,35 @@ fn main() -> Result<()> {
                 .call_object(CallArgs { kind: "fetch".into(), path: Some(path), http_method: Some(method), body, ..Default::default() })
                 .await?;
             print(&v);
+            Ok(())
+        })?,
+        Cmd::Test { file } => local(async move {
+            let v = Tools::new(file)?.run_tests(Some("live")).await?;
+            print(&v);
+            if v["ok"] != json!(true) {
+                std::process::exit(1);
+            }
+            Ok(())
+        })?,
+        Cmd::Changes { file, limit } => print(&Tools::new(file)?.list_changes(limit)?),
+        Cmd::Undo { file, back_to } => print(&Tools::new(file)?.undo_changes(back_to)?),
+        Cmd::Checkout { file, dir } => print(&Tools::new(file)?.checkout(&dir)?),
+        Cmd::Commit { dir, message, file, no_release } => local(async move {
+            let file = match file {
+                Some(f) => f,
+                None => {
+                    let state: Value = serde_json::from_str(
+                        &std::fs::read_to_string(dir.join(".pdo/checkout.json"))
+                            .with_context(|| format!("{} is not a pdo checkout", dir.display()))?,
+                    )?;
+                    PathBuf::from(state["object"].as_str().context("checkout has no object path")?)
+                }
+            };
+            let v = Tools::new(file)?.commit(&dir, &message, !no_release).await?;
+            print(&v);
+            if v["released"] != json!(true) && !no_release {
+                std::process::exit(1);
+            }
             Ok(())
         })?,
         Cmd::Export { file, out, worker_name } => {

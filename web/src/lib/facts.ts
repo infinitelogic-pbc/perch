@@ -74,9 +74,12 @@ export const TOOLS: Tool[] = [
   { name: 'read_code', kind: 'read', does: 'Files at the live check-in, the preview, or any check-in id (a 4+ character prefix works). Binary files come back as base64.' },
   { name: 'list_checkins', kind: 'read', does: 'History, newest first, with unified diffs and the migrations each check-in added.' },
   { name: 'query_data', kind: 'read', does: 'Read-only SQL over the object’s own tables, live or preview. At most 500 rows.' },
-  { name: 'propose_change', kind: 'write', does: 'Code edits plus new migrations, applied to a preview copy of the file (live data included) and built there. Proposals stack; restart starts over from live.' },
+  { name: 'propose_change', kind: 'write', does: 'Whole files, exact-string edits and new migrations, applied to a preview copy of the file (live data included), built there, stored tests run. Proposals stack; restart starts over from live.' },
   { name: 'test_call', kind: 'write', does: 'fetch, an RPC method or alarm() on the preview. Returns the result, console logs and the rows each table gained, changed or lost.' },
-  { name: 'release_change', kind: 'destructive', does: 'Runs the preview’s migrations on the live file and moves live to its code, squashed into one check-in, in one transaction. Refused if the preview did not build or live moved.' },
+  { name: 'run_tests', kind: 'read', does: 'Runs the object’s test/*.ts files. Each test gets its own fresh, empty copy of the object and a clock it controls.' },
+  { name: 'list_changes', kind: 'read', does: 'Recent data changes on live: the event, the time, rows per table, and whether each can be undone.' },
+  { name: 'undo_changes', kind: 'destructive', does: 'Reverses a data change and every newer one in one transaction. Refused across a migration. Recorded, so an undo can be undone.' },
+  { name: 'release_change', kind: 'destructive', does: 'Runs the preview’s migrations on the live file and moves live to its code, squashed into one check-in, in one transaction. Refused if the preview did not build, a stored test fails, or live moved.' },
   { name: 'rollback_code', kind: 'destructive', does: 'Moves live back to an earlier check-in. Code only, never schema: refused when that code no longer fits the tables.' },
   { name: 'call_object', kind: 'destructive', does: 'fetch or an RPC method on the live object. Writes change live data.' },
 ];
@@ -94,6 +97,11 @@ export const COMMANDS: Command[] = [
   { usage: 'pdo checkins <file> [--limit 20] [--diffs]', does: 'Code history.' },
   { usage: 'pdo call <file> <method> [json-args]', does: 'Call an RPC method on the live object.' },
   { usage: 'pdo fetch <file> <path> [-X METHOD] [-d BODY]', does: 'Send one request to the live object’s fetch().' },
+  { usage: 'pdo test <file>', does: 'Run the stored tests, each on a fresh empty copy. Exit 1 on failure.' },
+  { usage: 'pdo changes <file> [--limit 20]', does: 'Recent data changes.' },
+  { usage: 'pdo undo <file> <id>', does: 'Reverse that data change and every newer one.' },
+  { usage: 'pdo checkout <file> <dir>', does: 'Write the live check-in as plain files, for your own tools.' },
+  { usage: 'pdo commit <dir> -m MSG [--no-release]', does: 'Bring a checkout back: build, run tests, release.' },
   { usage: 'pdo export <file> <out> [--worker-name W]', does: 'Write the live code as a Wrangler project.' },
 ];
 

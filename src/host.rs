@@ -30,6 +30,13 @@ pub enum Event {
     Alarm {
         retry_count: i64,
     },
+    /// List the tests registered by the loaded test files.
+    TestList,
+    /// Run one registered test against this (scratch) object.
+    TestRun {
+        file: String,
+        name: String,
+    },
 }
 
 #[derive(Serialize, Default, Debug, Clone)]
@@ -72,6 +79,10 @@ pub struct Host {
     echo_logs: bool,
     /// Logs from a constructor run, carried into the next outcome.
     pending_logs: Vec<LogLine>,
+    /// Test files to load alongside the class (scratch objects only).
+    tests: Vec<String>,
+    /// The data epoch the engine was built at; an undo bumps it.
+    epoch: Option<String>,
 }
 
 /// Count rows touched per table in a changeset.
@@ -108,16 +119,28 @@ impl Host {
             loaded: None,
             echo_logs,
             pending_logs: vec![],
+            tests: vec![],
+            epoch: None,
         })
+    }
+
+    /// A host that also loads these test files (for scratch objects).
+    pub fn open_for_tests(path: &Path, tests: Vec<String>) -> Result<Host> {
+        let mut h = Host::open(path, false)?;
+        h.tests = tests;
+        Ok(h)
     }
 
     /// Make sure the engine runs the live check-in, rebuilding it (and running
     /// the constructor) when the live check-in moved since the last event.
     pub async fn ensure(&mut self) -> Result<()> {
         let live = self.store.live_checkin()?;
-        if self.engine.is_some() && self.loaded.as_deref() == Some(live.as_str()) {
+        // An undo rewrites data under the instance; rebuild so in-memory state is fresh.
+        let epoch = self.store.meta("data_epoch")?;
+        if self.engine.is_some() && self.loaded.as_deref() == Some(live.as_str()) && self.epoch == epoch {
             return Ok(());
         }
+        self.epoch = epoch;
         self.engine = None;
         self.loaded = None;
         let files = self.store.files_at(&live)?;
@@ -130,6 +153,7 @@ impl Host {
             files,
             &main,
             self.echo_logs,
+            &self.tests,
         )
         .await?;
         self.engine = Some(engine);
@@ -272,6 +296,12 @@ impl Host {
                 json!({ "kind": "alarm", "retryCount": retry_count }),
                 None,
             ),
+            Event::TestList => ("test", json!({ "kind": "test_list" }), None),
+            Event::TestRun { file, name } => (
+                "test",
+                json!({ "kind": "test_run", "file": file, "name": name, "objectName": self.store.meta_req("name")? }),
+                None,
+            ),
         };
         let (r, cs) = self.run_in_txn(label, &checkin, json, body).await?;
         let mut logs = std::mem::take(&mut self.pending_logs);
@@ -294,7 +324,7 @@ impl Host {
                     status,
                     headers,
                     body: d.body,
-                    result: d.meta.get("result").cloned(),
+                    result: d.meta.get("result").or_else(|| d.meta.get("tests")).cloned(),
                     logs,
                     changes,
                     checkin,

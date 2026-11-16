@@ -40,6 +40,11 @@ pdo call my.obj <method> '[args]'      # RPC from the shell
 pdo fetch my.obj /path                 # one request to fetch()
 pdo describe my.obj                    # tables, code, live check-in, next alarm
 pdo checkins my.obj --diffs            # code history
+pdo test my.obj                        # stored tests, each on a fresh empty copy
+pdo changes my.obj                     # recent data changes
+pdo undo my.obj <id>                   # reverse that change and every newer one
+pdo checkout my.obj dir/               # plain files, for your own tools
+pdo commit dir/ -m "what changed"      # build, test, release
 pdo export my.obj out/ && (cd out && bunx wrangler deploy)
 ```
 
@@ -140,13 +145,77 @@ result carries a short guide to writing an object.
 | `read_code` | readOnly | files at a check-in (live, `preview`, or an id prefix); binary as `{ base64 }` by path |
 | `list_checkins` | readOnly | history with unified diffs and the migrations each check-in added |
 | `query_data` | readOnly | read-only SQL over data tables, live or preview, 500 rows max |
-| `propose_change` | write | code edits + new migrations applied to a preview copy (`todo.obj.preview`, live data included) and built there: modules load and the constructor runs. Proposals stack; `restart: true` starts from live |
+| `propose_change` | write | whole files, `edits` (exact old/new string replacements) and new migrations, applied to a preview copy (`todo.obj.preview`, live data included) and built there: modules load, the constructor runs, stored tests run. Proposals stack; `restart: true` starts from live |
 | `test_call` | write | fetch, RPC or alarm on the preview; returns the result, logs and rows changed per table |
-| `release_change` | destructive | runs the preview's migrations on live and moves the live check-in, squashed into one check-in, in one transaction; refused if the preview did not build or live moved |
+| `run_tests` | readOnly | runs `test/*.ts`, each test on its own fresh empty copy of the object |
+| `list_changes` | readOnly | recent data changes on live: event, time, rows per table, whether undoable |
+| `undo_changes` | destructive | reverses a data change and every newer one in one transaction; refused across a migration; recorded, so it can be undone |
+| `release_change` | destructive | runs the preview's migrations on live and moves the live check-in, squashed into one check-in, in one transaction; refused if the preview did not build, a stored test fails, or live moved |
 | `rollback_code` | destructive | moves the live check-in back; refused when that code's schema snapshot no longer fits (a table or column it knew is gone, or a new NOT NULL column has no default) |
 | `call_object` | destructive | fetch or RPC on the live object |
 
 Migrations only go forward; a rollback changes code, never schema.
+
+## The harness is in the file
+
+There is no separate dev environment: the artifact is the workspace, the
+runtime is the sandbox, and the MCP tools are the harness. Four pieces make
+that efficient for agents and safe for people who never see the code.
+
+**Edits.** After the first version, `propose_change` takes
+`edits: [{ path, old, new }]`: `old` must match the file exactly and occur once
+(or set `replace_all`). A one-line fix costs one line.
+
+**Stored tests.** Tests live in the object under `test/` and travel with it.
+They run on every proposal, and `release_change` refuses while any fail; there
+is no override. Each test gets its own fresh, empty copy of the object (same
+code, every migration replayed, no data), so results never depend on live
+data, and a clock it controls:
+
+```ts
+import { test, expect } from "pdo:test";
+
+test("cleanup removes items done for over a day", async (obj) => {
+  const item = await obj.rpc("add", "old");          // public methods, as RPC
+  await obj.rpc("setDone", item.id, true);
+  obj.clock.advance(2 * 24 * 60 * 60 * 1000);        // Date.now() follows it
+  await obj.alarm();                                 // run alarm() now
+  expect(obj.sql("SELECT count(*) AS n FROM todos")[0].n).toBe(0);
+  const res = await obj.fetch("/todos", { body: { title: "x" } });  // JSON POST
+  expect(res.status).toBe(201);
+});
+```
+
+`obj` has `fetch`, `rpc`, `alarm`, `sql` (seeding and assertions), `storage`
+and `clock.set/advance/now`. `expect` has `toBe`, `toEqual`, `toBeTruthy`,
+`toBeFalsy`, `toBeNull`, `toBeDefined`, `toContain`, `toHaveLength`,
+`toBeGreaterThan`, `toBeLessThan`, `toMatch` and `.not`. `pdo test my.obj`
+runs them from the shell (exit 1 on failure); `examples/todo/test` has seven.
+
+**Data undo.** Every event's changeset is already in `_obj_changes`.
+`list_changes` shows them; `undo_changes { back_to }` inverts that change and
+every newer one, newest first, in one transaction, restoring rows and KV
+values (alarms are not restored). It aborts untouched if a change no longer
+applies cleanly, is refused across a migration, and is recorded as a change
+itself, so an undo can be undone. A running `pdo run` rebuilds its isolate on
+the next event so in-memory state matches. From the shell: `pdo changes`,
+`pdo undo my.obj <id>`.
+
+**Checkout and commit.** For anyone with their own tools (an editor, git,
+Claude Code): `pdo checkout my.obj dir/` writes the live check-in as plain
+files, with applied migrations under `migrations/` for reference. Edit, add
+new `migrations/NNNN_name.sql`, then `pdo commit dir/ -m "what changed"`: the
+changes go through the same gate as MCP (build, stored tests) and are released
+(`--no-release` stops at the preview). A failing commit exits 1 and leaves
+live unchanged. A checkout is refused once live has moved past it.
+
+## Direction
+
+The next layer is a framework class that lives in an object and turns it into
+an app described as data, so agents configure more and code less. Its default
+interface is a spreadsheet: **tables** are the typed view of the database, and
+**sheets** are the UIs built on those tables. pdo stays the low-level layer
+underneath.
 
 ## Cloudflare
 
@@ -167,7 +236,8 @@ do locally. Moving state in or out of Cloudflare is not in v0.
   rolls it back under a running server, checks that a rollback across a
   breaking migration is refused, serves a copy of the file, and covers static
   files (every clean-URL case, 304s, HEAD, base64 images, serving while the
-  constructor throws, the export's assets config) (80 checks).
+  constructor throws, the export's assets config), edits, the stored-test
+  release gate, data undo and redo, and checkout/commit (106 checks).
 - `bun test/http-calls.ts <base>` runs the same 17 HTTP calls (API, RPC, alarm,
   static files, an imported template) against any host; it passes against
   `pdo run` and against the `pdo export` deploy on Cloudflare.

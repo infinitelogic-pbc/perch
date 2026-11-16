@@ -450,6 +450,13 @@ deno_core::extension!(
 
 // ---------------------------------------------------------------- modules
 
+const PDO_TEST: &str = r#"
+export const test = globalThis.__pdo.testApi.test;
+export const it = test;
+export const expect = globalThis.__pdo.testApi.expect;
+export const describe = (_name, fn) => fn();
+"#;
+
 const CLOUDFLARE_WORKERS: &str = r#"
 export const DurableObject = globalThis.__pdo.DurableObject;
 export const WorkerEntrypoint = globalThis.__pdo.WorkerEntrypoint;
@@ -500,6 +507,8 @@ pub fn transpile(path: &str, code: &str) -> Result<(String, Option<Vec<u8>>)> {
 
 struct ObjectLoader {
     files: Files,
+    /// Test files may import "pdo:test"; object code may not.
+    test_mode: bool,
     source_maps: RefCell<HashMap<String, Vec<u8>>>,
 }
 
@@ -526,6 +535,12 @@ impl ModuleLoader for ObjectLoader {
         if specifier.starts_with("cloudflare:") {
             return ModuleSpecifier::parse(specifier).map_err(JsErrorBox::from_err);
         }
+        if specifier == "pdo:test" {
+            if !self.test_mode || !referrer.starts_with("pdo:///test/") {
+                return Err(JsErrorBox::generic("pdo:test can only be imported by files under test/, when tests run"));
+            }
+            return ModuleSpecifier::parse(specifier).map_err(JsErrorBox::from_err);
+        }
         if !(specifier.starts_with("./") || specifier.starts_with("../") || specifier.starts_with("pdo:")) {
             return Err(JsErrorBox::generic(format!(
                 "cannot import {specifier:?}: pdo v0 loads only files inside the object (relative imports) and cloudflare:workers; vendor the package into the object"
@@ -536,7 +551,9 @@ impl ModuleLoader for ObjectLoader {
 
     fn load(&self, spec: &ModuleSpecifier, _r: Option<&ModuleLoadReferrer>, _o: ModuleLoadOptions) -> ModuleLoadResponse {
         let r = (|| -> Result<ModuleSource, ModuleLoaderError> {
-            let code = if spec.scheme() == "cloudflare" {
+            let code = if spec.as_str() == "pdo:test" {
+                PDO_TEST.to_string()
+            } else if spec.scheme() == "cloudflare" {
                 if spec.path() != "workers" {
                     return Err(JsErrorBox::generic(format!("{spec} is not available in pdo v0")));
                 }
@@ -604,12 +621,14 @@ impl Engine {
         files: Files,
         main: &str,
         echo_logs: bool,
+        tests: &[String],
     ) -> Result<Engine> {
         if !files.contains_key(main) {
             bail!("entry file {main} is not in this check-in");
         }
         let loader = ObjectLoader {
             files,
+            test_mode: !tests.is_empty(),
             source_maps: RefCell::new(HashMap::new()),
         };
         let mut rt = JsRuntime::new(RuntimeOptions {
@@ -630,9 +649,13 @@ impl Engine {
         rt.execute_script("pdo:bootstrap.js", include_str!("../js/bootstrap.js"))
             .map_err(|e| anyhow!("bootstrap: {e}"))?;
         let main_spec = ModuleSpecifier::parse("pdo:///__pdo_main__.js")?;
-        let code = format!(
+        let mut code = format!(
             "import * as mod from \"pdo:///{main}\";\nglobalThis.__pdo.setModule(mod);\n"
         );
+        for t in tests {
+            let t = serde_json::to_string(t)?;
+            code.push_str(&format!("globalThis.__pdo.beginTestFile({t});\nawait import(\"pdo:///\" + {t});\n"));
+        }
         // Top-level module code runs sandboxed too.
         let old = mode.set(Mode::Sandbox);
         let r = async {

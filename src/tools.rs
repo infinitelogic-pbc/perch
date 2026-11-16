@@ -24,6 +24,9 @@ pub struct ProposeArgs {
     /// path -> new contents (text, or { base64 } for binary), or null to delete the file
     #[serde(default)]
     pub files: BTreeMap<String, Option<FileValue>>,
+    /// exact-string replacements in existing text files, applied after `files`
+    #[serde(default)]
+    pub edits: Vec<EditArg>,
     #[serde(default)]
     pub migrations: Vec<Migration>,
     pub message: String,
@@ -32,16 +35,29 @@ pub struct ProposeArgs {
 }
 
 #[derive(Deserialize, Clone)]
+pub struct EditArg {
+    pub path: String,
+    pub old: String,
+    pub new: String,
+    #[serde(default)]
+    pub replace_all: bool,
+}
+
+#[derive(Deserialize, Clone)]
 #[serde(untagged)]
 pub enum FileValue {
     Text(String),
     Binary { base64: String },
+    /// Bytes read from disk (pdo commit); never comes over MCP.
+    #[serde(skip)]
+    Raw(Vec<u8>),
 }
 
 impl FileValue {
     pub fn bytes(&self) -> Result<Vec<u8>> {
         use base64::Engine;
         match self {
+            FileValue::Raw(b) => Ok(b.clone()),
             FileValue::Text(s) => Ok(s.clone().into_bytes()),
             FileValue::Binary { base64 } => base64::engine::general_purpose::STANDARD
                 .decode(base64.trim())
@@ -421,6 +437,24 @@ impl Tools {
                 }
             }
         }
+        for e in &a.edits {
+            let cur = files
+                .get(&e.path)
+                .ok_or_else(|| anyhow!("edit: no file {} (send new files whole in `files`)", e.path))?;
+            let text = std::str::from_utf8(cur).map_err(|_| anyhow!("edit: {} is not a text file", e.path))?;
+            let n = text.matches(e.old.as_str()).count();
+            if e.old.is_empty() || n == 0 {
+                bail!("edit: `old` was not found in {}; it must match the file exactly, whitespace included (read_code shows the current text)", e.path);
+            }
+            if n > 1 && !e.replace_all {
+                bail!("edit: `old` occurs {n} times in {}; add surrounding lines to make it unique, or set replace_all", e.path);
+            }
+            let next = if e.replace_all { text.replace(e.old.as_str(), &e.new) } else { text.replacen(e.old.as_str(), &e.new, 1) };
+            if !changed.contains(&e.path) {
+                changed.push(e.path.clone());
+            }
+            files.insert(e.path.clone(), next.into_bytes());
+        }
         let (id, warnings) = commit_checkin(&p, Some(&head), &files, &a.migrations, &a.message)
             .map_err(|e| anyhow!("{e}\n(the preview is unchanged; fix the migration or code and propose again)"))?;
         let schema = p.schema()?;
@@ -441,7 +475,16 @@ impl Tools {
             Ok(()) => ps.set_meta("preview_built", &id)?,
             Err(_) => ps.delete_meta("preview_built")?,
         }
+        drop(ps);
+        // Stored tests run on every proposal that builds.
+        let tests = if built.is_ok() && files.keys().any(|p| is_test_file(p)) {
+            Some(self.run_tests(Some("preview")).await?)
+        } else {
+            None
+        };
+        let tests_ok = tests.as_ref().is_none_or(|t| t["ok"] == json!(true));
         Ok(json!({
+            "tests": tests,
             "checkin": id,
             "base": live_ck,
             "stacked_on_previous_preview": stack,
@@ -450,7 +493,7 @@ impl Tools {
             "warnings": warnings,
             "schema": schema,
             "build": match &built { Ok(()) => json!({ "ok": true }), Err(e) => json!({ "ok": false, "error": e.to_string() }) },
-            "next": if built.is_ok() { "test_call against the preview, then release_change" } else { "fix the build error with another propose_change" },
+            "next": if built.is_err() { "fix the build error with another propose_change" } else if !tests_ok { "fix the failing tests with another propose_change; release_change is refused while they fail" } else { "test_call against the preview, then release_change" },
         }))
     }
 
@@ -541,6 +584,24 @@ impl Tools {
         if p.meta("preview_built")?.as_deref() != Some(head.as_str()) {
             bail!("the preview head did not build; fix it with propose_change before releasing");
         }
+        // Stored tests gate the release. There is no override: fix the code or
+        // change the test, and either way it shows in the history.
+        if p.files_at(&head)?.keys().any(|k| is_test_file(k))
+            && p.meta("preview_tested")?.as_deref() != Some(head.as_str())
+        {
+            let t = self.run_tests(Some("preview")).await?;
+            if t["ok"] != json!(true) {
+                let failing: Vec<String> = t["results"]
+                    .as_array()
+                    .map(|r| r.iter().filter(|x| x["ok"] != json!(true)).map(|x| format!("{} > {}", x["file"].as_str().unwrap_or(""), x["name"].as_str().unwrap_or(""))).collect())
+                    .unwrap_or_default();
+                bail!(
+                    "refusing to release: {} of {} stored tests fail ({}){}. Fix them with propose_change; run_tests shows the errors.",
+                    t["failed"], t["total"], failing.join("; "),
+                    t["error"].as_str().map(|e| format!(": {e}")).unwrap_or_default()
+                );
+            }
+        }
         // Walk the preview chain head -> base.
         let mut chain = vec![];
         let mut cur = head.clone();
@@ -602,4 +663,336 @@ impl Tools {
             "note": "code moved back; schema and data are unchanged",
         }))
     }
+
+    // ------------------------------------------------------------ stored tests
+
+    /// Run the object's `test/` files. Every test gets its own fresh, empty
+    /// copy of the object (same code, every migration replayed, no data), so
+    /// tests are deterministic and never see live or preview data.
+    pub async fn run_tests(&mut self, target: Option<&str>) -> Result<Value> {
+        let use_preview = match target {
+            Some("live") => false,
+            Some("preview") => true,
+            _ => preview_path(&self.path).exists(),
+        };
+        let s = if use_preview {
+            self.preview_store()?.ok_or_else(|| anyhow!("there is no preview copy; propose_change creates one"))?
+        } else {
+            self.store()?
+        };
+        let head = s.live_checkin()?;
+        let files = s.files_at(&head)?;
+        let test_files: Vec<String> = files.keys().filter(|p| is_test_file(p)).cloned().collect();
+        let which = if use_preview { "preview" } else { "live" };
+        if test_files.is_empty() {
+            return Ok(json!({ "ok": true, "target": which, "total": 0, "passed": 0, "failed": 0, "results": [], "note": "no test files; add test/*.ts that import { test, expect } from \"pdo:test\"" }));
+        }
+        let migrations: Vec<Migration> = s.migrations()?.into_iter().map(|m| Migration { name: m.1, sql: m.2 }).collect();
+        let (name, class) = (s.meta_req("name")?, s.meta_req("class")?);
+        let dir = std::env::temp_dir().join(format!("pdo-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir)?;
+        let r = async {
+            // One empty template, copied per test.
+            let template = dir.join("template.obj");
+            drop(Store::create(&template, &name, &class, &files, &migrations, "test")?);
+            let fresh = |i: usize| -> Result<PathBuf> {
+                let p = dir.join(format!("t{i}.obj"));
+                std::fs::copy(&template, &p)?;
+                Ok(p)
+            };
+            let mut lister = Host::open_for_tests(&fresh(0)?, test_files.clone())?;
+            let listed = match lister.event(Event::TestList).await {
+                Ok(o) if o.ok => o.result.unwrap_or(json!([])),
+                Ok(o) => return Ok(json!({ "ok": false, "target": which, "total": 0, "passed": 0, "failed": 0, "results": [], "error": o.error })),
+                Err(e) => return Ok(json!({ "ok": false, "target": which, "total": 0, "passed": 0, "failed": 0, "results": [], "error": format!("the tests did not load: {e:#}") })),
+            };
+            drop(lister);
+            let mut results = vec![];
+            let (mut passed, mut failed) = (0, 0);
+            for (i, t) in listed.as_array().cloned().unwrap_or_default().into_iter().enumerate() {
+                let file = t["file"].as_str().unwrap_or("").to_string();
+                let tname = t["name"].as_str().unwrap_or("").to_string();
+                let started = std::time::Instant::now();
+                let mut h = Host::open_for_tests(&fresh(i + 1)?, vec![file.clone()])?;
+                let out = h.event(Event::TestRun { file: file.clone(), name: tname.clone() }).await;
+                let ms = started.elapsed().as_millis() as u64;
+                let entry = match out {
+                    Ok(o) if o.ok => {
+                        passed += 1;
+                        json!({ "file": file, "name": tname, "ok": true, "ms": ms })
+                    }
+                    Ok(o) => {
+                        failed += 1;
+                        json!({ "file": file, "name": tname, "ok": false, "ms": ms, "error": o.error, "logs": o.logs })
+                    }
+                    Err(e) => {
+                        failed += 1;
+                        json!({ "file": file, "name": tname, "ok": false, "ms": ms, "error": format!("{e:#}") })
+                    }
+                };
+                results.push(entry);
+            }
+            Ok::<_, anyhow::Error>(json!({
+                "ok": failed == 0,
+                "target": which,
+                "checkin": head,
+                "total": passed + failed,
+                "passed": passed,
+                "failed": failed,
+                "results": results,
+            }))
+        }
+        .await;
+        let _ = std::fs::remove_dir_all(&dir);
+        let v = r?;
+        if use_preview {
+            if v["ok"] == json!(true) {
+                s.set_meta("preview_tested", &head)?;
+            } else {
+                s.delete_meta("preview_tested")?;
+            }
+        }
+        Ok(v)
+    }
+
+    // ------------------------------------------------------------ data undo
+
+    fn change_rows(s: &Store, where_sql: &str, arg: i64) -> Result<Vec<(i64, i64, String, Option<String>, Vec<u8>)>> {
+        s.with_mode(Mode::Privileged, |c| {
+            let mut st = c.prepare(&format!(
+                "SELECT id, at, event, checkin, changeset FROM _obj_changes {where_sql} ORDER BY id DESC"
+            ))?;
+            let v = st
+                .query_map([arg], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))?
+                .collect::<rusqlite::Result<Vec<_>>>();
+            v
+        })
+        .map_err(Into::into)
+    }
+
+    fn last_migration_at(s: &Store) -> Result<i64> {
+        Ok(s.with_mode(Mode::Privileged, |c| {
+            c.query_row("SELECT coalesce(max(applied_at), 0) FROM _obj_migrations", [], |r| r.get(0))
+        })?)
+    }
+
+    /// Recent data changes on the live object, newest first.
+    pub fn list_changes(&self, limit: usize) -> Result<Value> {
+        let s = self.store()?;
+        let rows = Self::change_rows(&s, "WHERE id > ?", -1)?;
+        let mig_at = Self::last_migration_at(&s)?;
+        let mut undoable = true;
+        let mut out = vec![];
+        for (id, at, event, checkin, cs) in rows.iter().take(limit) {
+            if event == "migration" || *at <= mig_at {
+                undoable = false;
+            }
+            out.push(json!({
+                "id": id,
+                "at": iso(*at),
+                "event": event,
+                "checkin": checkin.as_deref().map(|c| &c[..c.len().min(12)]),
+                "tables": crate::host::summarize_changeset(cs),
+                "undoable": undoable,
+            }));
+        }
+        Ok(json!({
+            "changes": out,
+            "total": rows.len(),
+            "note": "undo_changes { back_to: id } reverses that change and every newer one. Changes at or before the last migration cannot be undone.",
+        }))
+    }
+
+    /// Reverse every recorded data change with id >= `back_to`, newest first,
+    /// in one transaction. The undo is itself recorded, so it can be undone.
+    pub fn undo_changes(&mut self, back_to: i64) -> Result<Value> {
+        use rusqlite::session::{ConflictAction, invert_strm};
+        use std::io::Read;
+        let s = self.store()?;
+        let rows = Self::change_rows(&s, "WHERE id >= ?", back_to)?;
+        if rows.is_empty() || rows.last().map(|r| r.0) != Some(back_to) {
+            bail!("no recorded change with id {back_to}; list_changes shows the ids");
+        }
+        let mig_at = Self::last_migration_at(&s)?;
+        if let Some(r) = rows.iter().find(|r| r.2 == "migration" || r.1 <= mig_at) {
+            bail!(
+                "refusing: change {} is at or before a migration, and schema changes only go forward. The oldest change that can be undone is newer than {}.",
+                r.0, iso(mig_at)
+            );
+        }
+        self.live = None;
+        s.with_mode(Mode::Privileged, |c| c.execute_batch("BEGIN IMMEDIATE; PRAGMA defer_foreign_keys = ON;"))?;
+        let r = (|| {
+            let conn = s.conn.clone();
+            let mut session = Session::new(&conn)?;
+            session.table_filter(Some(|t: &str| !t.starts_with("_obj_") || t == "_obj_kv"));
+            session.attach::<&str>(None)?;
+            for (id, _, _, _, cs) in &rows {
+                let mut inverted = Vec::new();
+                let mut src: &[u8] = cs;
+                invert_strm(&mut src as &mut dyn Read, &mut inverted)?;
+                let mut inv: &[u8] = &inverted;
+                conn.apply_strm(
+                    &mut inv as &mut dyn Read,
+                    None::<fn(&str) -> bool>,
+                    |_kind, _item| ConflictAction::SQLITE_CHANGESET_ABORT,
+                )
+                .map_err(|e| anyhow!("change {id} no longer applies cleanly ({e}); nothing was undone"))?;
+            }
+            let mut cs = Vec::new();
+            session.changeset_strm(&mut cs)?;
+            drop(session);
+            conn.execute(
+                "INSERT INTO _obj_changes(at, event, checkin, changeset) VALUES (?, 'undo', ?, ?)",
+                rusqlite::params![now_ms(), s.live_checkin()?, cs],
+            )?;
+            let new_id = conn.last_insert_rowid();
+            s.set_meta("data_epoch", &now_ms().to_string())?;
+            Ok::<_, anyhow::Error>((new_id, cs))
+        })();
+        match r {
+            Ok((new_id, cs)) => {
+                s.with_mode(Mode::Privileged, |c| c.execute_batch("COMMIT; PRAGMA wal_checkpoint(PASSIVE);"))?;
+                Ok(json!({
+                    "undone": rows.iter().map(|r| r.0).collect::<Vec<_>>(),
+                    "tables": crate::host::summarize_changeset(&cs),
+                    "recorded_as": new_id,
+                    "note": "data and KV are restored; alarms are not. Undo this undo with undo_changes { back_to: recorded_as }.",
+                }))
+            }
+            Err(e) => {
+                let _ = s.with_mode(Mode::Privileged, |c| c.execute_batch("ROLLBACK"));
+                Err(e)
+            }
+        }
+    }
+
+    // ------------------------------------------------------------ checkout / commit
+
+    /// Write the live check-in as plain files, with applied migrations for
+    /// reference, so any editor or harness can work on it.
+    pub fn checkout(&self, dir: &Path) -> Result<Value> {
+        let s = self.store()?;
+        let live = s.live_checkin()?;
+        let files = s.files_at(&live)?;
+        if dir.exists() && std::fs::read_dir(dir)?.next().is_some() {
+            bail!("{} is not empty; check out into a new directory", dir.display());
+        }
+        for (p, c) in &files {
+            let dest = dir.join(p);
+            if let Some(d) = dest.parent() {
+                std::fs::create_dir_all(d)?;
+            }
+            std::fs::write(&dest, c)?;
+        }
+        let mdir = dir.join("migrations");
+        std::fs::create_dir_all(&mdir)?;
+        let mut applied = vec![];
+        for (seq, name, sql, _, _) in s.migrations()? {
+            let stem = if name.starts_with(|c: char| c.is_ascii_digit()) { name.clone() } else { format!("{seq:04}_{name}") };
+            std::fs::write(mdir.join(format!("{stem}.sql")), sql)?;
+            applied.push(stem);
+        }
+        std::fs::create_dir_all(dir.join(".pdo"))?;
+        std::fs::write(
+            dir.join(".pdo/checkout.json"),
+            serde_json::to_string_pretty(&json!({ "object": std::fs::canonicalize(&self.path)?.display().to_string(), "base": live, "applied_migrations": applied }))?,
+        )?;
+        Ok(json!({
+            "checked_out": dir.display().to_string(),
+            "base": live,
+            "files": files.keys().collect::<Vec<_>>(),
+            "migrations": applied,
+            "next": format!("edit files, add new migrations/*.sql, then: pdo commit {} -m \"what changed\"", dir.display()),
+        }))
+    }
+
+    /// Bring a checked-out directory back as a proposal through the same
+    /// build-and-test gate, and release it unless told not to.
+    pub async fn commit(&mut self, dir: &Path, message: &str, release: bool) -> Result<Value> {
+        let state: Value = serde_json::from_str(
+            &std::fs::read_to_string(dir.join(".pdo/checkout.json"))
+                .map_err(|_| anyhow!("{} is not a pdo checkout (no .pdo/checkout.json)", dir.display()))?,
+        )?;
+        let s = self.store()?;
+        let live = s.live_checkin()?;
+        if state["base"].as_str() != Some(live.as_str()) {
+            bail!("the object moved since this checkout (live is {}); check out again and reapply your changes", &live[..12]);
+        }
+        let mut disk = Files::new();
+        for sub in OBJECT_DIRS {
+            let d = dir.join(sub);
+            if d.is_dir() {
+                read_dir_bytes(dir, &d, &mut disk)?;
+            }
+        }
+        let current = s.files_at(&live)?;
+        let mut files: BTreeMap<String, Option<FileValue>> = BTreeMap::new();
+        for (p, c) in &disk {
+            if current.get(p) != Some(c) {
+                files.insert(p.clone(), Some(FileValue::Raw(c.clone())));
+            }
+        }
+        for p in current.keys() {
+            if !disk.contains_key(p) {
+                files.insert(p.clone(), None);
+            }
+        }
+        let applied: HashSet<String> = state["applied_migrations"]
+            .as_array()
+            .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+            .unwrap_or_default();
+        let mut migrations = vec![];
+        let mdir = dir.join("migrations");
+        if mdir.is_dir() {
+            let mut entries: Vec<PathBuf> = std::fs::read_dir(&mdir)?.filter_map(|e| e.ok()).map(|e| e.path()).filter(|p| p.extension().is_some_and(|x| x == "sql")).collect();
+            entries.sort();
+            for p in entries {
+                let stem = p.file_stem().unwrap().to_string_lossy().to_string();
+                if !applied.contains(&stem) {
+                    migrations.push(Migration { name: stem, sql: std::fs::read_to_string(&p)? });
+                }
+            }
+        }
+        if files.is_empty() && migrations.is_empty() {
+            bail!("nothing to commit: the directory matches the live check-in");
+        }
+        let new_migs: Vec<String> = migrations.iter().map(|m| m.name.clone()).collect();
+        let proposed = self
+            .propose_change(ProposeArgs { files, edits: vec![], migrations, message: message.to_string(), restart: true })
+            .await?;
+        let ok = proposed["build"]["ok"] == json!(true) && proposed["tests"].get("ok").is_none_or(|t| *t == json!(true));
+        if !ok || !release {
+            return Ok(json!({ "released": false, "proposal": proposed, "note": if ok { "left as a preview (pdo run <file>.preview to try it)" } else { "not released: fix the errors and commit again" } }));
+        }
+        let released = self.release_change(Some(message.to_string())).await?;
+        let mut all: Vec<String> = applied.into_iter().collect();
+        all.extend(new_migs);
+        all.sort();
+        std::fs::write(
+            dir.join(".pdo/checkout.json"),
+            serde_json::to_string_pretty(&json!({ "object": state["object"], "base": released["released"], "applied_migrations": all }))?,
+        )?;
+        Ok(json!({ "released": true, "checkin": released["released"], "files_changed": proposed["files_changed"], "migrations_applied": released["migrations_applied"], "tests": proposed["tests"] }))
+    }
+}
+
+/// Directories of a checkout (and of `pdo new --from`) that hold object files.
+pub const OBJECT_DIRS: &[&str] = &["src", "public", "test"];
+
+pub fn is_test_file(path: &str) -> bool {
+    path.starts_with("test/") && (path.ends_with(".ts") || path.ends_with(".js"))
+}
+
+pub fn read_dir_bytes(root: &Path, dir: &Path, out: &mut Files) -> Result<()> {
+    for e in std::fs::read_dir(dir)? {
+        let p = e?.path();
+        if p.is_dir() {
+            read_dir_bytes(root, &p, out)?;
+        } else if p.file_name().is_some_and(|n| n != ".DS_Store") {
+            let rel = p.strip_prefix(root)?.to_string_lossy().replace('\\', "/");
+            out.insert(rel, std::fs::read(&p)?);
+        }
+    }
+    Ok(())
 }
