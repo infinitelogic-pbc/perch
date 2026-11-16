@@ -48,16 +48,12 @@ pub struct EditArg {
 pub enum FileValue {
     Text(String),
     Binary { base64: String },
-    /// Bytes read from disk (pdo commit); never comes over MCP.
-    #[serde(skip)]
-    Raw(Vec<u8>),
 }
 
 impl FileValue {
     pub fn bytes(&self) -> Result<Vec<u8>> {
         use base64::Engine;
         match self {
-            FileValue::Raw(b) => Ok(b.clone()),
             FileValue::Text(s) => Ok(s.clone().into_bytes()),
             FileValue::Binary { base64 } => base64::engine::general_purpose::STANDARD
                 .decode(base64.trim())
@@ -936,118 +932,9 @@ impl Tools {
             }
         }
     }
-
-    // ------------------------------------------------------------ checkout / commit
-
-    /// Write the live check-in as plain files, with applied migrations for
-    /// reference, so any editor or harness can work on it.
-    pub fn checkout(&self, dir: &Path) -> Result<Value> {
-        let s = self.store()?;
-        let live = s.live_checkin()?;
-        let files = s.files_at(&live)?;
-        if dir.exists() && std::fs::read_dir(dir)?.next().is_some() {
-            bail!("{} is not empty; check out into a new directory", dir.display());
-        }
-        for (p, c) in &files {
-            let dest = dir.join(p);
-            if let Some(d) = dest.parent() {
-                std::fs::create_dir_all(d)?;
-            }
-            std::fs::write(&dest, c)?;
-        }
-        let mdir = dir.join("migrations");
-        std::fs::create_dir_all(&mdir)?;
-        let mut applied = vec![];
-        for (seq, name, sql, _, _) in s.migrations()? {
-            let stem = if name.starts_with(|c: char| c.is_ascii_digit()) { name.clone() } else { format!("{seq:04}_{name}") };
-            std::fs::write(mdir.join(format!("{stem}.sql")), sql)?;
-            applied.push(stem);
-        }
-        std::fs::create_dir_all(dir.join(".pdo"))?;
-        std::fs::write(
-            dir.join(".pdo/checkout.json"),
-            serde_json::to_string_pretty(&json!({ "object": std::fs::canonicalize(&self.path)?.display().to_string(), "base": live, "applied_migrations": applied }))?,
-        )?;
-        Ok(json!({
-            "checked_out": dir.display().to_string(),
-            "base": live,
-            "files": files.keys().collect::<Vec<_>>(),
-            "migrations": applied,
-            "next": format!("edit files, add new migrations/*.sql, then: pdo commit {} -m \"what changed\"", dir.display()),
-        }))
-    }
-
-    /// Bring a checked-out directory back as a proposal through the same
-    /// build-and-test gate, and release it unless told not to.
-    pub async fn commit(&mut self, dir: &Path, message: &str, release: bool) -> Result<Value> {
-        let state: Value = serde_json::from_str(
-            &std::fs::read_to_string(dir.join(".pdo/checkout.json"))
-                .map_err(|_| anyhow!("{} is not a pdo checkout (no .pdo/checkout.json)", dir.display()))?,
-        )?;
-        let s = self.store()?;
-        let live = s.live_checkin()?;
-        if state["base"].as_str() != Some(live.as_str()) {
-            bail!("the object moved since this checkout (live is {}); check out again and reapply your changes", &live[..12]);
-        }
-        let mut disk = Files::new();
-        for sub in OBJECT_DIRS {
-            let d = dir.join(sub);
-            if d.is_dir() {
-                read_dir_bytes(dir, &d, &mut disk)?;
-            }
-        }
-        let current = s.files_at(&live)?;
-        let mut files: BTreeMap<String, Option<FileValue>> = BTreeMap::new();
-        for (p, c) in &disk {
-            if current.get(p) != Some(c) {
-                files.insert(p.clone(), Some(FileValue::Raw(c.clone())));
-            }
-        }
-        for p in current.keys() {
-            if !disk.contains_key(p) {
-                files.insert(p.clone(), None);
-            }
-        }
-        let applied: HashSet<String> = state["applied_migrations"]
-            .as_array()
-            .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
-            .unwrap_or_default();
-        let mut migrations = vec![];
-        let mdir = dir.join("migrations");
-        if mdir.is_dir() {
-            let mut entries: Vec<PathBuf> = std::fs::read_dir(&mdir)?.filter_map(|e| e.ok()).map(|e| e.path()).filter(|p| p.extension().is_some_and(|x| x == "sql")).collect();
-            entries.sort();
-            for p in entries {
-                let stem = p.file_stem().unwrap().to_string_lossy().to_string();
-                if !applied.contains(&stem) {
-                    migrations.push(Migration { name: stem, sql: std::fs::read_to_string(&p)? });
-                }
-            }
-        }
-        if files.is_empty() && migrations.is_empty() {
-            bail!("nothing to commit: the directory matches the live check-in");
-        }
-        let new_migs: Vec<String> = migrations.iter().map(|m| m.name.clone()).collect();
-        let proposed = self
-            .propose_change(ProposeArgs { files, edits: vec![], migrations, message: message.to_string(), restart: true })
-            .await?;
-        let ok = proposed["build"]["ok"] == json!(true) && proposed["tests"].get("ok").is_none_or(|t| *t == json!(true));
-        if !ok || !release {
-            return Ok(json!({ "released": false, "proposal": proposed, "note": if ok { "left as a preview (pdo run <file>.preview to try it)" } else { "not released: fix the errors and commit again" } }));
-        }
-        let released = self.release_change(Some(message.to_string())).await?;
-        let mut all: Vec<String> = applied.into_iter().collect();
-        all.extend(new_migs);
-        all.sort();
-        std::fs::write(
-            dir.join(".pdo/checkout.json"),
-            serde_json::to_string_pretty(&json!({ "object": state["object"], "base": released["released"], "applied_migrations": all }))?,
-        )?;
-        Ok(json!({ "released": true, "checkin": released["released"], "files_changed": proposed["files_changed"], "migrations_applied": released["migrations_applied"], "tests": proposed["tests"] }))
-    }
 }
 
-/// Directories of a checkout (and of `pdo new --from`) that hold object files.
+/// Directories `pdo new --from` reads object files from.
 pub const OBJECT_DIRS: &[&str] = &["src", "public", "test"];
 
 pub fn is_test_file(path: &str) -> bool {

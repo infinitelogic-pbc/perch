@@ -50,8 +50,6 @@ pdo checkins my.obj --diffs            # code history
 pdo test my.obj                        # stored tests, each on a fresh empty copy
 pdo changes my.obj                     # recent data changes
 pdo undo my.obj <id>                   # reverse that change and every newer one
-pdo checkout my.obj dir/               # plain files, for your own tools
-pdo commit dir/ -m "what changed"      # build, test, release
 pdo export my.obj out/ && (cd out && bunx wrangler deploy)
 ```
 
@@ -167,7 +165,7 @@ Migrations only go forward; a rollback changes code, never schema.
 ## The harness is in the file
 
 There is no separate dev environment: the artifact is the workspace, the
-runtime is the sandbox, and the MCP tools are the harness. Four pieces make
+runtime is the sandbox, and the MCP tools are the harness. Three pieces make
 that efficient for agents and safe for people who never see the code.
 
 **Edits.** After the first version, `propose_change` takes
@@ -208,14 +206,6 @@ applies cleanly, is refused across a migration, and is recorded as a change
 itself, so an undo can be undone. A running `pdo run` rebuilds its isolate on
 the next event so in-memory state matches. From the shell: `pdo changes`,
 `pdo undo my.obj <id>`.
-
-**Checkout and commit.** For anyone with their own tools (an editor, git,
-Claude Code): `pdo checkout my.obj dir/` writes the live check-in as plain
-files, with applied migrations under `migrations/` for reference. Edit, add
-new `migrations/NNNN_name.sql`, then `pdo commit dir/ -m "what changed"`: the
-changes go through the same gate as MCP (build, stored tests) and are released
-(`--no-release` stops at the preview). A failing commit exits 1 and leaves
-live unchanged. A checkout is refused once live has moved past it.
 
 ## Claude connector directory rules
 
@@ -286,8 +276,8 @@ do locally. Moving state in or out of Cloudflare is not in v0.
   breaking migration is refused, serves a copy of the file, and covers static
   files (every clean-URL case, 304s, HEAD, base64 images, serving while the
   constructor throws, the export's assets config), edits, the stored-test
-  release gate, data undo and redo, checkout/commit, and the directory rules
-  below (annotations, read/write separation, enforced read-only calls) (119 checks).
+  release gate, data undo and redo, and the directory rules
+  below (annotations, read/write separation, enforced read-only calls) (112 checks).
 - `bun test/http-calls.ts <base>` runs the same 17 HTTP calls (API, RPC, alarm,
   static files, an imported template) against any host; it passes against
   `pdo run` and against the `pdo export` deploy on Cloudflare.

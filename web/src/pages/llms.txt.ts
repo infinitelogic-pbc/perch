@@ -98,9 +98,6 @@ runs on its own fresh, empty copy of the object. \`obj\` has
 toBeTruthy, toBeFalsy, toBeNull, toBeDefined, toContain, toHaveLength,
 toBeGreaterThan, toBeLessThan, toMatch and .not.
 
-Checkout: \`pdo checkout <file> <dir>\` writes plain files; \`pdo commit <dir>
--m MSG\` brings them back through the same build-and-test gate.
-
 Example client config: \`claude mcp add todo -- pdo mcp todo.obj\`
 
 ## CLI

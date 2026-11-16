@@ -101,8 +101,6 @@ export const COMMANDS: Command[] = [
   { usage: 'pdo test <file>', does: 'Run the stored tests, each on a fresh empty copy. Exit 1 on failure.' },
   { usage: 'pdo changes <file> [--limit 20]', does: 'Recent data changes.' },
   { usage: 'pdo undo <file> <id>', does: 'Reverse that data change and every newer one.' },
-  { usage: 'pdo checkout <file> <dir>', does: 'Write the live check-in as plain files, for your own tools.' },
-  { usage: 'pdo commit <dir> -m MSG [--no-release]', does: 'Bring a checkout back: build, run tests, release.' },
   { usage: 'pdo export <file> <out> [--worker-name W]', does: 'Write the live code as a Wrangler project.' },
 ];
 

@@ -337,7 +337,7 @@ ok(wr.assets?.directory === "./public", "export maps public/ to assets.directory
 ok(readFileSync(join(out, "public/logo.png")).equals(PNG) && readFileSync(join(out, "src/hello.html"), "utf8") === "<h1>dynamic</h1>", "export writes binary and text files unchanged");
 ok(wr.rules?.[0]?.globs?.includes("**/*.css"), "export adds text-import rules for .css/.md/.svg");
 
-// ------------------------------------------------------------------ edits, stored tests, undo, checkout/commit
+// ------------------------------------------------------------------ edits, stored tests, undo
 const gate = join(dir, "gate.obj");
 sh(["new", gate, "--class", "Todo", "--name", "todo"]);
 const m3 = new Mcp(gate);
@@ -428,32 +428,6 @@ r = await m3.tool("list_checkins", {});
 ok(r.v.checkins[0].diff === undefined, "list_checkins leaves diffs out unless asked");
 m3.close();
 
-// Checkout, edit with ordinary tools, commit.
-function shFail(args: string[]): { code: number; out: any } {
-  const p = Bun.spawnSync([PDO, ...args], { stderr: "pipe" });
-  let out: any = null;
-  try { out = JSON.parse(p.stdout.toString()); } catch {}
-  return { code: p.exitCode, out };
-}
-const co = join(dir, "checkout");
-const cout = sh(["checkout", gate, co]);
-ok(cout.files.includes("test/todo.test.ts") && cout.migrations.length === 2 && existsSync(join(co, "migrations/0002_note.sql")), "pdo checkout writes files and applied migrations");
-const idx = join(co, "src/index.ts");
-await Bun.write(idx, readFileSync(idx, "utf8").replace('{ error: "title is required" }', '{ error: "a title is required" }'));
-await Bun.write(join(co, "public/hello.txt"), "hi");
-await Bun.write(join(co, "migrations/0003_priority.sql"), "ALTER TABLE todos ADD COLUMN priority INTEGER NOT NULL DEFAULT 0;\n");
-const c1 = sh(["commit", co, "-m", "clearer error, priority column"]);
-ok(c1.released && c1.tests.passed === 7 && c1.migrations_applied.includes("0003_priority"), "pdo commit builds, tests and releases");
-const dg = sh(["describe", gate]);
-ok(dg.live_checkin.message === "clearer error, priority column" && dg.tables[0].columns.some((c: any) => c.name === "priority") && dg.public.length === 1, "the commit is live: code, migration and static file");
-await Bun.write(idx, readFileSync(idx, "utf8").replace("{ status: 201 }", "{ status: 202 }"));
-const c2 = shFail(["commit", co, "-m", "break it"]);
-ok(c2.code === 1 && c2.out.released === false && c2.out.proposal.tests.failed === 1, "a commit that fails a test exits 1 and is not released");
-ok(sh(["describe", gate]).live_checkin.message === "clearer error, priority column", "live is unchanged after the failed commit");
-await Bun.write(idx, readFileSync(idx, "utf8").replace("{ status: 202 }", "{ status: 201 }"));
-await Bun.write(join(co, "public/hello.txt"), "hello");
-ok(sh(["commit", co, "-m", "second commit from the same checkout"]).released, "the same checkout can commit again");
-ok(shFail(["commit", co, "-m", "nothing"]).code !== 0, "a commit with no changes is refused");
 ok(sh(["test", gate]).passed === 7, "pdo test runs the stored tests from the CLI");
 
 console.log(`\n${passed} checks passed (${dir})`);

@@ -100,21 +100,6 @@ enum Cmd {
     },
     /// Reverse the data change with this id and every newer one
     Undo { file: PathBuf, back_to: i64 },
-    /// Write the live check-in as plain files to edit with your own tools
-    Checkout { file: PathBuf, dir: PathBuf },
-    /// Bring a checkout back: build, run tests, release
-    Commit {
-        dir: PathBuf,
-        /// What changed
-        #[arg(short, long)]
-        message: String,
-        /// Object file (default: the one this directory was checked out from)
-        #[arg(long)]
-        file: Option<PathBuf>,
-        /// Stop after building and testing on the preview
-        #[arg(long)]
-        no_release: bool,
-    },
 }
 
 fn pascal(s: &str) -> String {
@@ -231,25 +216,6 @@ fn main() -> Result<()> {
         })?,
         Cmd::Changes { file, limit } => print(&Tools::new(file)?.list_changes(limit)?),
         Cmd::Undo { file, back_to } => print(&Tools::new(file)?.undo_changes(back_to)?),
-        Cmd::Checkout { file, dir } => print(&Tools::new(file)?.checkout(&dir)?),
-        Cmd::Commit { dir, message, file, no_release } => local(async move {
-            let file = match file {
-                Some(f) => f,
-                None => {
-                    let state: Value = serde_json::from_str(
-                        &std::fs::read_to_string(dir.join(".pdo/checkout.json"))
-                            .with_context(|| format!("{} is not a pdo checkout", dir.display()))?,
-                    )?;
-                    PathBuf::from(state["object"].as_str().context("checkout has no object path")?)
-                }
-            };
-            let v = Tools::new(file)?.commit(&dir, &message, !no_release).await?;
-            print(&v);
-            if v["released"] != json!(true) && !no_release {
-                std::process::exit(1);
-            }
-            Ok(())
-        })?,
         Cmd::Export { file, out, worker_name } => {
             export::export(&file, &out, worker_name.as_deref())?;
             print(&json!({ "exported": out.display().to_string(), "next": format!("cd {} && bunx wrangler deploy", out.display()) }));
