@@ -5,7 +5,7 @@
 // starts a fresh worker for each file it opens.
 
 import sqlite3InitModule from "@sqlite.org/sqlite-wasm";
-// pdo's own bootstrap, the same file the native binary embeds.
+// perch's own bootstrap, the same file the native binary embeds.
 import bootstrap from "../../../js/bootstrap.js?raw";
 import { ObjRuntime, type Req } from "./objrun";
 
@@ -46,11 +46,11 @@ async function open(bytes: Uint8Array) {
       real(...args);
     };
   }
-  // As in native pdo v0, object code has no network: SQLite is loaded, so
+  // As in native perch v0, object code has no network: SQLite is loaded, so
   // nothing in this worker needs it any more.
   const g = self as any;
   const refuse = async () => {
-    throw new Error("outbound fetch is not available in pdo v0 (bindings, including an allowlisted fetch, come later)");
+    throw new Error("outbound fetch is not available in perch v0 (bindings, including an allowlisted fetch, come later)");
   };
   g.fetch = refuse;
   for (const k of ["XMLHttpRequest", "WebSocket", "EventSource", "importScripts", "WebTransport"]) {

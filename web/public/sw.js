@@ -1,4 +1,4 @@
-// pdo browser runtime: route the running object's requests to it.
+// perch browser runtime: route the running object's requests to it.
 //
 // The /run page shows the object's app in an iframe. Every request that comes
 // from inside an iframe on this origin (page loads, links, form posts, fetch,
@@ -46,10 +46,10 @@ function page(status, title, detail) {
 
 async function toObject(req) {
   const client = await runner();
-  if (!client) return page(503, "No object is open", "Open a .obj file on the run page to see it here.");
+  if (!client) return page(503, "No object is open", "Open a .perch file on the run page to see it here.");
   const body = req.method === "GET" || req.method === "HEAD" ? null : new Uint8Array(await req.arrayBuffer());
   const message = {
-    type: "pdo-fetch",
+    type: "perch-fetch",
     req: { method: req.method, url: req.url, headers: [...req.headers], body },
   };
   const res = await new Promise((resolve) => {

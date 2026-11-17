@@ -1,4 +1,4 @@
-// pdo runtime bootstrap: the Workers globals a Durable Object class expects,
+// perch runtime bootstrap: the Workers globals a Durable Object class expects,
 // and ctx.storage backed by the object file. Runs once per isolate, before the
 // object's module graph loads.
 ((globalThis) => {
@@ -27,9 +27,9 @@
     throw new TypeError("expected bytes");
   }
 
-  // In a browser (the pdo web runtime) Request, Response, URL, timers and the
+  // In a browser (the perch web runtime) Request, Response, URL, timers and the
   // rest are native, so only ctx.storage and the dispatcher below are needed.
-  const NATIVE = globalThis.__pdoNativeGlobals === true;
+  const NATIVE = globalThis.__perchNativeGlobals === true;
 
   function installGlobals() {
   const log = (level) => (...args) => ops.op_log(level, args.map(show).join(" "));
@@ -191,7 +191,7 @@
       return core.encode(body.toString());
     }
     if (body instanceof ArrayBuffer || ArrayBuffer.isView(body)) return new Uint8Array(toU8(body));
-    throw new TypeError("pdo v0 bodies are strings, bytes or URLSearchParams (streams are not supported yet)");
+    throw new TypeError("perch v0 bodies are strings, bytes or URLSearchParams (streams are not supported yet)");
   }
 
   class Body {
@@ -207,7 +207,7 @@
     async bytes() { return new Uint8Array(this._consume()); }
     async text() { return core.decode(this._consume()); }
     async json() { return JSON.parse(await this.text()); }
-    async formData() { throw new TypeError("formData() is not supported in pdo v0"); }
+    async formData() { throw new TypeError("formData() is not supported in perch v0"); }
   }
 
   class Request extends Body {
@@ -250,7 +250,7 @@
   globalThis.Request = Request;
   globalThis.Response = Response;
   globalThis.fetch = async () => {
-    throw new Error("outbound fetch is not available in pdo v0 (bindings, including an allowlisted fetch, come later)");
+    throw new Error("outbound fetch is not available in perch v0 (bindings, including an allowlisted fetch, come later)");
   };
   } // installGlobals
   if (!NATIVE) installGlobals();
@@ -258,7 +258,7 @@
   // ------------------------------------------------------------ KV value encoding
   // Values in _obj_kv are UTF-8 JSON, readable by any runtime (native V8, a
   // browser, Cloudflare tooling). Plain JSON values are stored as they are;
-  // everything else structured clone can carry is tagged with "$pdo". Shared
+  // everything else structured clone can carry is tagged with "$perch". Shared
   // references are stored once per use, and cycles are refused.
   const TYPED = ["Uint8Array", "Int8Array", "Uint8ClampedArray", "Int16Array", "Uint16Array", "Int32Array", "Uint32Array", "Float32Array", "Float64Array", "BigInt64Array", "BigUint64Array", "DataView"];
   function b64(u8) {
@@ -276,28 +276,28 @@
     if (v === null || typeof v === "boolean" || typeof v === "string") return v;
     if (typeof v === "number") {
       if (Number.isFinite(v) && !Object.is(v, -0)) return v;
-      return { $pdo: "number", v: Object.is(v, -0) ? "-0" : String(v) };
+      return { $perch: "number", v: Object.is(v, -0) ? "-0" : String(v) };
     }
-    if (v === undefined) return { $pdo: "undefined" };
-    if (typeof v === "bigint") return { $pdo: "bigint", v: v.toString() };
+    if (v === undefined) return { $perch: "undefined" };
+    if (typeof v === "bigint") return { $perch: "bigint", v: v.toString() };
     if (typeof v === "function" || typeof v === "symbol") throw new TypeError(`cannot store a ${typeof v} in key-value storage`);
     if (seen.includes(v)) throw new TypeError("cannot store a value that contains itself in key-value storage");
     seen.push(v);
     let out;
-    if (v instanceof Date) out = { $pdo: "date", v: Number.isNaN(v.getTime()) ? null : v.getTime() };
-    else if (v instanceof ArrayBuffer) out = { $pdo: "bytes", t: "ArrayBuffer", v: b64(new Uint8Array(v)) };
+    if (v instanceof Date) out = { $perch: "date", v: Number.isNaN(v.getTime()) ? null : v.getTime() };
+    else if (v instanceof ArrayBuffer) out = { $perch: "bytes", t: "ArrayBuffer", v: b64(new Uint8Array(v)) };
     else if (ArrayBuffer.isView(v)) {
       const t = TYPED.find((n) => typeof globalThis[n] === "function" && v instanceof globalThis[n]) || "Uint8Array";
-      out = { $pdo: "bytes", t, v: b64(new Uint8Array(v.buffer, v.byteOffset, v.byteLength)) };
-    } else if (v instanceof Map) out = { $pdo: "map", v: [...v].map(([k, x]) => [kvTag(k, seen), kvTag(x, seen)]) };
-    else if (v instanceof Set) out = { $pdo: "set", v: [...v].map((x) => kvTag(x, seen)) };
-    else if (v instanceof RegExp) out = { $pdo: "regexp", v: [v.source, v.flags] };
-    else if (v instanceof Error) out = { $pdo: "error", v: { name: v.name, message: v.message, stack: v.stack } };
+      out = { $perch: "bytes", t, v: b64(new Uint8Array(v.buffer, v.byteOffset, v.byteLength)) };
+    } else if (v instanceof Map) out = { $perch: "map", v: [...v].map(([k, x]) => [kvTag(k, seen), kvTag(x, seen)]) };
+    else if (v instanceof Set) out = { $perch: "set", v: [...v].map((x) => kvTag(x, seen)) };
+    else if (v instanceof RegExp) out = { $perch: "regexp", v: [v.source, v.flags] };
+    else if (v instanceof Error) out = { $perch: "error", v: { name: v.name, message: v.message, stack: v.stack } };
     else if (Array.isArray(v)) out = Array.from(v, (x) => kvTag(x, seen));
     else {
       const o = {};
       for (const k of Object.keys(v)) o[k] = kvTag(v[k], seen);
-      out = Object.prototype.hasOwnProperty.call(v, "$pdo") ? { $pdo: "object", v: o } : o;
+      out = Object.prototype.hasOwnProperty.call(v, "$perch") ? { $perch: "object", v: o } : o;
     }
     seen.pop();
     return out;
@@ -305,12 +305,12 @@
   function kvUntag(v) {
     if (v === null || typeof v !== "object") return v;
     if (Array.isArray(v)) return v.map(kvUntag);
-    if (typeof v.$pdo !== "string") {
+    if (typeof v.$perch !== "string") {
       const o = {};
       for (const k of Object.keys(v)) o[k] = kvUntag(v[k]);
       return o;
     }
-    switch (v.$pdo) {
+    switch (v.$perch) {
       case "number": return v.v === "-0" ? -0 : Number(v.v);
       case "undefined": return undefined;
       case "bigint": return BigInt(v.v);
@@ -327,7 +327,7 @@
       case "regexp": return new RegExp(v.v[0], v.v[1]);
       case "error": { const e = new Error(v.v.message); e.name = v.v.name; e.stack = v.v.stack; return e; }
       case "object": { const o = {}; for (const k of Object.keys(v.v)) o[k] = kvUntag(v.v[k]); return o; }
-      default: throw new Error(`unknown key-value type tag ${v.$pdo}; this file was written by a newer pdo`);
+      default: throw new Error(`unknown key-value type tag ${v.$perch}; this file was written by a newer perch`);
     }
   }
   function kvEncode(v) { return core.encode(JSON.stringify(kvTag(v, []))); }
@@ -336,7 +336,7 @@
     // (first byte 0xFF). The native runtime still reads those; others cannot.
     if (bytes.length && bytes[0] === 0xff) {
       if (typeof core.deserialize === "function") return core.deserialize(bytes);
-      throw new Error("this value was stored by an older pdo in a V8-only format; open the object once with the pdo binary and write the key again to convert it");
+      throw new Error("this value was stored by an older perch in a V8-only format; open the object once with the perch binary and write the key again to convert it");
     }
     return kvUntag(JSON.parse(core.decode(bytes)));
   }
@@ -474,7 +474,7 @@
       storage,
       blockConcurrencyWhile(fn) { const p = Promise.resolve().then(fn); blockers.push(p); return p; },
       waitUntil(p) { waits.push(Promise.resolve(p)); },
-      acceptWebSocket() { throw new Error("WebSockets are not available in pdo v0"); },
+      acceptWebSocket() { throw new Error("WebSockets are not available in perch v0"); },
       getWebSockets() { return []; },
       setWebSocketAutoResponse() {},
       abort(reason) { throw new Error(`object aborted: ${reason ?? ""}`); },
@@ -536,7 +536,7 @@
     }
   }
 
-  // ------------------------------------------------------------ tests (pdo:test)
+  // ------------------------------------------------------------ tests (perch:test)
   // Test files register with test(name, fn). Each test runs in its own event
   // against a fresh, empty copy of the object, driving the real class instance.
   const tests = [];
@@ -566,7 +566,7 @@
         }
         const method = String(init.method || (body != null ? "POST" : "GET")).toUpperCase();
         if (typeof inst().fetch !== "function") return new Response("Not found", { status: 404 });
-        const url = /^https?:/.test(path) ? path : `http://${name}.pdo.local${path}`;
+        const url = /^https?:/.test(path) ? path : `http://${name}.perch.local${path}`;
         return await inst().fetch(new Request(url, { method, headers, body: method === "GET" || method === "HEAD" ? null : body }));
       },
       /** Call a public method, with the same rules and JSON round trip as RPC. */
@@ -636,7 +636,7 @@
     }
   }
 
-  globalThis.__pdo = {
+  globalThis.__perch = {
     DurableObject,
     WorkerEntrypoint,
     RpcTarget,

@@ -15,11 +15,11 @@ try {
 
 export default defineConfig({
   output: 'static',
-  site: `https://pdo.${baseDomain}`,
+  site: `https://perch.${baseDomain}`,
   trailingSlash: 'never',
   build: { format: 'file' },
   vite: {
-    // The browser runtime imports pdo's own js/bootstrap.js from the crate.
+    // The browser runtime imports perch's own js/bootstrap.js from the crate.
     server: { fs: { allow: ['..'] } },
     worker: { format: 'es' },
     optimizeDeps: { exclude: ['@sqlite.org/sqlite-wasm'] },

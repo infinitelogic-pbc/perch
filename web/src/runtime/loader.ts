@@ -1,6 +1,6 @@
 // Turn the object's files into loadable ES modules: strip TypeScript types,
 // then rewrite each import to the URL of the module it names. The rules match
-// the native loader in pdo/src/engine.rs.
+// the native loader in perch/src/engine.rs.
 
 import { transform } from "sucrase";
 import { init as lexerInit, parse } from "es-module-lexer";
@@ -8,10 +8,10 @@ import { init as lexerInit, parse } from "es-module-lexer";
 export const TEXT_MODULE_EXTS = ["html", "txt", "sql", "css", "md", "svg"];
 
 const CLOUDFLARE_WORKERS = `
-export const DurableObject = globalThis.__pdo.DurableObject;
-export const WorkerEntrypoint = globalThis.__pdo.WorkerEntrypoint;
-export const RpcTarget = globalThis.__pdo.RpcTarget;
-export const env = globalThis.__pdo.env;
+export const DurableObject = globalThis.__perch.DurableObject;
+export const WorkerEntrypoint = globalThis.__perch.WorkerEntrypoint;
+export const RpcTarget = globalThis.__perch.RpcTarget;
+export const env = globalThis.__perch.env;
 export default { DurableObject, WorkerEntrypoint, RpcTarget, env };
 `;
 
@@ -70,7 +70,7 @@ export async function link(files: Map<string, Uint8Array>, entry: string, toUrl:
         const spec: string = im.specifier;
         let url: string;
         if (spec.startsWith("cloudflare:")) {
-          if (spec !== "cloudflare:workers") throw new Error(`${spec} is not available in pdo v0`);
+          if (spec !== "cloudflare:workers") throw new Error(`${spec} is not available in perch v0`);
           url = cfUrl ??= toUrl(CLOUDFLARE_WORKERS, "cloudflare:workers");
         } else if (spec.startsWith("./") || spec.startsWith("../")) {
           const target = resolvePath(path, spec);
@@ -78,14 +78,14 @@ export async function link(files: Map<string, Uint8Array>, entry: string, toUrl:
           if (!found) throw new Error(`module not found in object: ${target} (imported by ${path})`);
           url = load(found);
         } else {
-          throw new Error(`cannot import ${JSON.stringify(spec)}: pdo v0 loads only files inside the object (relative imports) and cloudflare:workers; vendor the package into the object`);
+          throw new Error(`cannot import ${JSON.stringify(spec)}: perch v0 loads only files inside the object (relative imports) and cloudflare:workers; vendor the package into the object`);
         }
         // A static specifier's range excludes its quotes; a dynamic one's includes them.
         js = js.slice(0, im.start) + (im.type === "dynamic" ? JSON.stringify(url) : url) + js.slice(im.end);
       }
     }
     stack.pop();
-    const url = toUrl(`${js}\n//# sourceURL=pdo:///${path}`, path);
+    const url = toUrl(`${js}\n//# sourceURL=perch:///${path}`, path);
     done.set(path, url);
     return url;
   };

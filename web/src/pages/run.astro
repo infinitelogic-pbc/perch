@@ -1,22 +1,22 @@
 ---
 import Base from '../layouts/Base.astro';
 ---
-<Base title="Run an object in your browser: pdo" description="Open a .obj file and run it here, in this tab. SQLite and the object's code run in your browser; nothing is uploaded.">
+<Base title="Run an object in your browser: perch" description="Open a .perch file and run it here, in this tab. SQLite and the object's code run in your browser; nothing is uploaded.">
   <div class="wrap run">
     <section id="start" class="start stack">
       <p class="eyebrow">Run</p>
-      <h1>Open a <span class="mono">.obj</span> and run it in this tab.</h1>
+      <h1>Open a <span class="mono">.perch</span> and run it in this tab.</h1>
       <p class="lede">
         The file is a SQLite database holding an app's code and data. This page runs both in your
         browser: nothing is uploaded, and there is no server behind it.
       </p>
       <div id="drop" class="drop">
-        <p><strong>Drop a .obj file here</strong>, or</p>
+        <p><strong>Drop a .perch file here</strong>, or</p>
         <div class="row">
           <button id="pick" class="btn primary" type="button">Open a file</button>
           <button id="example" class="btn" type="button">Try the to-do example</button>
         </div>
-        <input id="file" type="file" accept=".obj,.preview,application/octet-stream" hidden />
+        <input id="file" type="file" accept=".perch,.preview,application/octet-stream" hidden />
         <p id="start-status" class="small" role="status" aria-live="polite"></p>
       </div>
       <ul class="notes small">
@@ -76,7 +76,7 @@ import Base from '../layouts/Base.astro';
 
   let worker: Worker | null = null;
   let ready = false;
-  let fileName = "object.obj";
+  let fileName = "object.perch";
   let handle: any = null;        // FileSystemFileHandle when the browser gave us one
   let canWrite = false;          // readwrite permission granted on the handle
   let dirty = false;
@@ -95,9 +95,9 @@ import Base from '../layouts/Base.astro';
     }
   }
   navigator.serviceWorker?.addEventListener("message", (e) => {
-    if (e.data?.type !== "pdo-fetch") return;
+    if (e.data?.type !== "perch-fetch") return;
     const port = e.ports[0];
-    if (!worker || !ready) return port.postMessage({ error: "Open a .obj file on the run page to see it here." });
+    if (!worker || !ready) return port.postMessage({ error: "Open a .perch file on the run page to see it here." });
     const id = nextId++;
     waiting.set(id, (m) => {
       if (m.type === "response") port.postMessage(m.res, [m.res.body.buffer]);
@@ -227,7 +227,7 @@ import Base from '../layouts/Base.astro';
     const picker = (window as any).showOpenFilePicker;
     if (!picker) return $("file").click();
     try {
-      const [h] = await picker({ types: [{ description: "Portable object", accept: { "application/octet-stream": [".obj", ".preview"] } }] });
+      const [h] = await picker({ types: [{ description: "Portable object", accept: { "application/octet-stream": [".perch", ".preview"] } }] });
       const f = await h.getFile();
       await open(new Uint8Array(await f.arrayBuffer()), f.name, h);
     } catch (e: any) {
@@ -240,9 +240,9 @@ import Base from '../layouts/Base.astro';
   };
   $("example").onclick = async () => {
     startStatus.textContent = "Fetching the example…";
-    const r = await fetch("/examples/todo.obj");
+    const r = await fetch("/examples/todo.perch");
     if (!r.ok) return void (startStatus.textContent = "The example is not available.");
-    await open(new Uint8Array(await r.arrayBuffer()), "todo.obj");
+    await open(new Uint8Array(await r.arrayBuffer()), "todo.perch");
   };
   const drop = $("drop");
   for (const ev of ["dragenter", "dragover"]) addEventListener(ev, (e) => { e.preventDefault(); drop.classList.add("over"); });

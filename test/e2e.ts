@@ -11,9 +11,9 @@ import { join } from "node:path";
 import { createInterface } from "node:readline";
 
 const ROOT = join(import.meta.dir, "..");
-const PDO = process.env.PDO ?? join(ROOT, "target/debug/pdo");
-const dir = mkdtempSync(join(tmpdir(), "pdo-e2e-"));
-const file = join(dir, "todo.obj");
+const PERCH = process.env.PERCH ?? join(ROOT, "target/debug/perch");
+const dir = mkdtempSync(join(tmpdir(), "perch-e2e-"));
+const file = join(dir, "todo.perch");
 
 let passed = 0;
 function ok(cond: unknown, what: string) {
@@ -26,8 +26,8 @@ function ok(cond: unknown, what: string) {
 }
 
 function sh(args: string[]): any {
-  const r = Bun.spawnSync([PDO, ...args], { stderr: "pipe" });
-  if (r.exitCode !== 0) throw new Error(`pdo ${args.join(" ")}: ${r.stderr.toString()}`);
+  const r = Bun.spawnSync([PERCH, ...args], { stderr: "pipe" });
+  if (r.exitCode !== 0) throw new Error(`perch ${args.join(" ")}: ${r.stderr.toString()}`);
   return JSON.parse(r.stdout.toString());
 }
 
@@ -36,7 +36,7 @@ class Mcp {
   next = 1;
   waiting = new Map<number, (v: any) => void>();
   constructor(path: string) {
-    this.proc = spawn(PDO, ["mcp", path], { stdio: ["pipe", "pipe", "inherit"] });
+    this.proc = spawn(PERCH, ["mcp", path], { stdio: ["pipe", "pipe", "inherit"] });
     createInterface({ input: this.proc.stdout! }).on("line", (line) => {
       const msg = JSON.parse(line);
       this.waiting.get(msg.id)?.(msg);
@@ -151,36 +151,36 @@ ok(sh(["describe", file]).next_alarm, "first live event ran the constructor, whi
 r = await mcp.tool("list_checkins", { diffs: true });
 ok(r.v.checkins[0].live && r.v.checkins[0].migrations.length === 1 && r.v.checkins[0].diff.includes("+import { uuidv7 }"), "list_checkins shows diff and migration");
 
-// ------------------------------------------------------------------ pdo run: HTTP + RPC + alarm
+// ------------------------------------------------------------------ perch run: HTTP + RPC + alarm
 async function serve(path: string, port: number): Promise<ChildProcess> {
-  const p = spawn(PDO, ["run", path, "--port", String(port)], { stdio: ["ignore", "ignore", "pipe"] });
+  const p = spawn(PERCH, ["run", path, "--port", String(port)], { stdio: ["ignore", "ignore", "pipe"] });
   p.stderr!.on("data", (d) => process.env.VERBOSE && process.stderr.write(d));
   for (let i = 0; i < 100; i++) {
     try { await fetch(`http://127.0.0.1:${port}/todos`); return p; } catch { await Bun.sleep(50); }
   }
-  throw new Error("pdo run did not start");
+  throw new Error("perch run did not start");
 }
 const port = 18000 + Math.floor(Math.random() * 1000);
 const base = `http://127.0.0.1:${port}`;
 let run = await serve(file, port);
-let res = await fetch(`${base}/todos`, { method: "POST", body: JSON.stringify({ title: "ship pdo" }), headers: { "content-type": "application/json" } });
+let res = await fetch(`${base}/todos`, { method: "POST", body: JSON.stringify({ title: "ship perch" }), headers: { "content-type": "application/json" } });
 const shipped = await res.json();
-ok(res.status === 201 && shipped.title === "ship pdo", "HTTP POST /todos");
+ok(res.status === 201 && shipped.title === "ship perch", "HTTP POST /todos");
 res = await fetch(`${base}/todos/${shipped.id}`, { method: "PATCH", body: JSON.stringify({ done: true }) });
 ok((await res.json()).done === 1, "HTTP PATCH marks done");
 res = await fetch(`${base}/todos?done=0`);
 const open = await res.json();
 ok(open.length === 1 && open[0].title === "write tests", "HTTP GET with query filter");
-res = await fetch(`${base}/.pdo/rpc/stats`, { method: "POST", body: "[]" });
+res = await fetch(`${base}/.perch/rpc/stats`, { method: "POST", body: "[]" });
 let stats = (await res.json()).result;
 ok(stats.total === 2 && stats.done === 1, "RPC over HTTP returns the right data");
-res = await fetch(`${base}/.pdo/rpc/constructor`, { method: "POST", body: "[]" });
+res = await fetch(`${base}/.perch/rpc/constructor`, { method: "POST", body: "[]" });
 ok(res.status === 500, "non-public methods are not RPC");
 
-await fetch(`${base}/.pdo/rpc/setRetention`, { method: "POST", body: "[0]" });
-await fetch(`${base}/.pdo/rpc/scheduleCleanup`, { method: "POST", body: "[300]" });
+await fetch(`${base}/.perch/rpc/setRetention`, { method: "POST", body: "[0]" });
+await fetch(`${base}/.perch/rpc/scheduleCleanup`, { method: "POST", body: "[300]" });
 await Bun.sleep(1200);
-stats = (await (await fetch(`${base}/.pdo/rpc/stats`, { method: "POST", body: "[]" })).json()).result;
+stats = (await (await fetch(`${base}/.perch/rpc/stats`, { method: "POST", body: "[]" })).json()).result;
 ok(stats.total === 1 && stats.done === 0 && stats.lastCleanup, "alarm fired on schedule and its writes show up in the data");
 const d = sh(["describe", file]);
 ok(d.next_alarm && d.next_alarm.at_ms > Date.now() + 60_000, "alarm rescheduled itself for midnight");
@@ -217,9 +217,9 @@ run.kill();
 mcp.close();
 
 // ------------------------------------------------------------------ carry the file
-const dir2 = mkdtempSync(join(tmpdir(), "pdo-carry-"));
-const file2 = join(dir2, "todo.obj");
-// Only the .obj file travels: every commit checkpoints the WAL into it.
+const dir2 = mkdtempSync(join(tmpdir(), "perch-carry-"));
+const file2 = join(dir2, "todo.perch");
+// Only the .perch file travels: every commit checkpoints the WAL into it.
 copyFileSync(file, file2);
 const port2 = port + 1;
 run = await serve(file2, port2);
@@ -233,7 +233,7 @@ const changes = sh(["checkins", file, "--limit", "100"]);
 ok(changes.total === 4, `history kept (${changes.total} check-ins)`);
 
 // ------------------------------------------------------------------ static files and text imports
-const site = join(dir, "site.obj");
+const site = join(dir, "site.perch");
 sh(["new", site, "--class", "Site"]);
 const m2 = new Mcp(site);
 await m2.rpc("initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "e2e", version: "0" } });
@@ -314,9 +314,9 @@ r = await m2.tool("read_object", { kind: "fetch", path: "/docs/" });
 ok(r.v.body === "<h1>docs</h1>" && r.v.read_only, "static files on live through read_object");
 m2.close();
 
-// pdo run: a class with no fetch() still serves its files, and 404s the rest.
-const bare = join(dir, "bare.obj");
-const seed = mkdtempSync(join(tmpdir(), "pdo-seed-"));
+// perch run: a class with no fetch() still serves its files, and 404s the rest.
+const bare = join(dir, "bare.perch");
+const seed = mkdtempSync(join(tmpdir(), "perch-seed-"));
 Bun.write(join(seed, "src/index.ts"), `import { DurableObject } from "cloudflare:workers";\nexport class Bare extends DurableObject {}\n`);
 Bun.write(join(seed, "public/index.html"), "<h1>bare</h1>");
 await Bun.sleep(50);
@@ -324,7 +324,7 @@ sh(["new", bare, "--class", "Bare", "--from", seed]);
 const port3 = port + 2;
 run = await serve(bare, port3);
 res = await fetch(`http://127.0.0.1:${port3}/`);
-ok(res.status === 200 && (await res.text()) === "<h1>bare</h1>", "pdo run serves public/ from --from imports");
+ok(res.status === 200 && (await res.text()) === "<h1>bare</h1>", "perch run serves public/ from --from imports");
 res = await fetch(`http://127.0.0.1:${port3}/nothing`);
 ok(res.status === 404, "no fetch() and no file is a 404");
 run.kill();
@@ -338,7 +338,7 @@ ok(readFileSync(join(out, "public/logo.png")).equals(PNG) && readFileSync(join(o
 ok(wr.rules?.[0]?.globs?.includes("**/*.css"), "export adds text-import rules for .css/.md/.svg");
 
 // ------------------------------------------------------------------ edits, stored tests, undo
-const gate = join(dir, "gate.obj");
+const gate = join(dir, "gate.perch");
 sh(["new", gate, "--class", "Todo", "--name", "todo"]);
 const m3 = new Mcp(gate);
 await m3.rpc("initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "e2e", version: "0" } });
@@ -428,7 +428,7 @@ r = await m3.tool("list_checkins", {});
 ok(r.v.checkins[0].diff === undefined, "list_checkins leaves diffs out unless asked");
 m3.close();
 
-ok(sh(["test", gate]).passed === 8, "pdo test runs the stored tests from the CLI");
+ok(sh(["test", gate]).passed === 8, "perch test runs the stored tests from the CLI");
 
 console.log(`\n${passed} checks passed (${dir})`);
 process.exit(0);

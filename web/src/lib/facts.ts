@@ -1,6 +1,6 @@
-// Everything the site states about pdo, in one place, so the pages and
-// /llms.txt cannot drift apart. Each entry is checked against pdo/src/*.rs,
-// pdo/js/bootstrap.js and pdo/test/*.ts as of v0.1.0.
+// Everything the site states about perch, in one place, so the pages and
+// /llms.txt cannot drift apart. Each entry is checked against perch/src/*.rs,
+// perch/js/bootstrap.js and perch/test/*.ts as of v0.1.0.
 
 export const TAGLINE = 'One SQLite file holding a Durable Object’s code and data.';
 
@@ -18,7 +18,7 @@ export const RESERVED: Table[] = [
     columns: 'key, value',
     holds: 'name, class, live check-in',
     detail:
-      'format_version (1), api_version (pdo-v0), name, class, main (src/index.ts), created_at and live_checkin, the id of the code that runs.',
+      'format_version (1), api_version (perch-v0), name, class, main (src/index.ts), created_at and live_checkin, the id of the code that runs.',
   },
   {
     name: '_obj_blobs',
@@ -46,7 +46,7 @@ export const RESERVED: Table[] = [
     columns: 'key, value',
     holds: 'ctx.storage.get / put',
     detail:
-      'The key-value half of storage. Values are UTF-8 JSON that any runtime can read; Date, Map, Set, bytes, bigint and the rest are tagged with $pdo, so what structuredClone accepts round-trips (cycles are refused).',
+      'The key-value half of storage. Values are UTF-8 JSON that any runtime can read; Date, Map, Set, bytes, bigint and the rest are tagged with $perch, so what structuredClone accepts round-trips (cycles are refused).',
   },
   {
     name: '_obj_alarms',
@@ -91,27 +91,27 @@ export interface Command {
 }
 
 export const COMMANDS: Command[] = [
-  { usage: 'pdo new <file> [--class C] [--name N] [--from DIR]', does: 'Create an object file: an empty class, or src/**, public/** and migrations/*.sql from a directory.' },
-  { usage: 'pdo run <file> [--port 8787] [--host 127.0.0.1] [--no-alarms]', does: 'Serve it over HTTP and fire its alarms.' },
-  { usage: 'pdo mcp <file>', does: 'The MCP server, over stdio.' },
-  { usage: 'pdo describe <file>', does: 'The description as JSON.' },
-  { usage: 'pdo checkins <file> [--limit 20] [--diffs]', does: 'Code history.' },
-  { usage: 'pdo call <file> <method> [json-args]', does: 'Call an RPC method on the live object.' },
-  { usage: 'pdo fetch <file> <path> [-X METHOD] [-d BODY]', does: 'Send one request to the live object’s fetch().' },
-  { usage: 'pdo test <file>', does: 'Run the stored tests, each on a fresh empty copy. Exit 1 on failure.' },
-  { usage: 'pdo changes <file> [--limit 20]', does: 'Recent data changes.' },
-  { usage: 'pdo undo <file> <id>', does: 'Reverse that data change and every newer one.' },
-  { usage: 'pdo export <file> <out> [--worker-name W]', does: 'Write the live code as a Wrangler project.' },
+  { usage: 'perch new <file> [--class C] [--name N] [--from DIR]', does: 'Create an object file: an empty class, or src/**, public/** and migrations/*.sql from a directory.' },
+  { usage: 'perch run <file> [--port 8787] [--host 127.0.0.1] [--no-alarms]', does: 'Serve it over HTTP and fire its alarms.' },
+  { usage: 'perch mcp <file>', does: 'The MCP server, over stdio.' },
+  { usage: 'perch describe <file>', does: 'The description as JSON.' },
+  { usage: 'perch checkins <file> [--limit 20] [--diffs]', does: 'Code history.' },
+  { usage: 'perch call <file> <method> [json-args]', does: 'Call an RPC method on the live object.' },
+  { usage: 'perch fetch <file> <path> [-X METHOD] [-d BODY]', does: 'Send one request to the live object’s fetch().' },
+  { usage: 'perch test <file>', does: 'Run the stored tests, each on a fresh empty copy. Exit 1 on failure.' },
+  { usage: 'perch changes <file> [--limit 20]', does: 'Recent data changes.' },
+  { usage: 'perch undo <file> <id>', does: 'Reverse that data change and every newer one.' },
+  { usage: 'perch export <file> <out> [--worker-name W]', does: 'Write the live code as a Wrangler project.' },
 ];
 
 /** What the runtime gives object code today. */
 export const RUNTIME: { api: string; note: string }[] = [
   { api: 'public/', note: 'static files served before fetch() without waking the object (Cloudflare Static Assets rules)' },
   { api: 'fetch(request)', note: 'every other HTTP request; import page from "./page.html" for templates' },
-  { api: 'public methods', note: 'RPC, also POST /.pdo/rpc/<method> with a JSON array of args' },
+  { api: 'public methods', note: 'RPC, also POST /.perch/rpc/<method> with a JSON array of args' },
   { api: 'ctx.storage.sql.exec', note: 'cursor with toArray, one, raw, rowsWritten' },
   { api: 'ctx.storage.get / put / delete / list', note: 'the KV half' },
-  { api: 'setAlarm / getAlarm / deleteAlarm, alarm()', note: 'fired on schedule by pdo run' },
+  { api: 'setAlarm / getAlarm / deleteAlarm, alarm()', note: 'fired on schedule by perch run' },
   { api: 'transactionSync, blockConcurrencyWhile', note: 'atomic writes, guarded startup' },
 ];
 

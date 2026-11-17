@@ -1,11 +1,11 @@
-// The pdo runtime for browsers: opens a .obj file with SQLite compiled to
+// The perch runtime for browsers: opens a .perch file with SQLite compiled to
 // WebAssembly and runs the object's class on the host's own JavaScript engine.
-// It evaluates pdo's own js/bootstrap.js, so ctx.storage, RPC rules and
+// It evaluates perch's own js/bootstrap.js, so ctx.storage, RPC rules and
 // dispatch are the same code the native binary runs; this file supplies the
 // "ops" underneath (SQL, KV, alarms) and the event loop around it.
 //
 // Environment-agnostic (a Web Worker, or bun for tests). One object per
-// JavaScript global, because the object's class lives on globalThis.__pdo.
+// JavaScript global, because the object's class lives on globalThis.__perch.
 
 import { CACHE_CONTROL, PUBLIC_DIR, contentType, decodePath, resolve } from "./assets";
 import { link, type ToUrl } from "./loader";
@@ -17,7 +17,7 @@ export type Log = { level: string; message: string };
 export interface OpenOptions {
   /** The sqlite3 module from @sqlite.org/sqlite-wasm, already initialised. */
   sqlite3: any;
-  /** Source text of pdo/js/bootstrap.js. */
+  /** Source text of perch/js/bootstrap.js. */
   bootstrap: string;
   /** How to turn module source into an importable URL (blob: by default). */
   toUrl?: ToUrl;
@@ -73,7 +73,7 @@ export class ObjRuntime {
     try {
       await rt.loadCode(opts);
     } catch (e: any) {
-      // As with `pdo run`: a class that does not load is reported, and its
+      // As with `perch run`: a class that does not load is reported, and its
       // static files are still served.
       rt.loadError = String(e?.stack || e);
     }
@@ -87,7 +87,7 @@ export class ObjRuntime {
       throw new Error("this is not a portable object file (not a SQLite database)");
     }
     const copy = bytes.slice();
-    // A file last written in WAL mode cannot be opened from memory. Every pdo
+    // A file last written in WAL mode cannot be opened from memory. Every perch
     // commit checkpoints the WAL, so the main file is complete: mark it as a
     // rollback-journal database (header bytes 18 and 19).
     copy[18] = 1;
@@ -113,7 +113,7 @@ export class ObjRuntime {
     }, 0);
   }
 
-  /** The same policy as `authorize` in pdo/src/store.rs, for object code. */
+  /** The same policy as `authorize` in perch/src/store.rs, for object code. */
   private authorize(action: number, a1: string | null, a2: string | null, dbName: string | null): boolean {
     if (this.mode === Mode.Privileged) return true;
     const c = this.capi;
@@ -177,9 +177,9 @@ export class ObjRuntime {
       op_db_size: () => rt.priv(() => Number(rt.db.selectValue("SELECT page_count * page_size FROM pragma_page_count(), pragma_page_size()"))),
       op_txn(action: string) {
         rt.priv(() => {
-          if (action === "begin") rt.db.exec(`SAVEPOINT pdo_tx_${++rt.savepoint}`);
-          else if (action === "commit") rt.db.exec(`RELEASE pdo_tx_${rt.savepoint--}`);
-          else { const n = rt.savepoint--; rt.db.exec(`ROLLBACK TO pdo_tx_${n}; RELEASE pdo_tx_${n}`); }
+          if (action === "begin") rt.db.exec(`SAVEPOINT perch_tx_${++rt.savepoint}`);
+          else if (action === "commit") rt.db.exec(`RELEASE perch_tx_${rt.savepoint--}`);
+          else { const n = rt.savepoint--; rt.db.exec(`ROLLBACK TO perch_tx_${n}; RELEASE perch_tx_${n}`); }
         });
       },
       op_kv_get: (key: string) => rt.priv(() => rt.db.selectValue("SELECT value FROM _obj_kv WHERE key = ?", [key]) ?? null),
@@ -220,7 +220,7 @@ export class ObjRuntime {
   private async loadCode(opts: OpenOptions) {
     const g = globalThis as any;
     const enc = new TextEncoder(), dec = new TextDecoder();
-    g.__pdoNativeGlobals = true;
+    g.__perchNativeGlobals = true;
     g.Deno = { ...(g.Deno ?? {}), core: { ops: this.ops(), encode: (s: string) => enc.encode(s), decode: (b: Uint8Array) => dec.decode(b) } };
     // Object code logs through console; send those to the host's log too.
     (0, eval)(opts.bootstrap);
@@ -238,7 +238,7 @@ export class ObjRuntime {
     } finally {
       this.mode = Mode.Privileged;
     }
-    g.__pdo.setModule(mod);
+    g.__perch.setModule(mod);
     const out = await this.event("init", { kind: "init", className: this.className, name: this.name, env: {} });
     if (!out.ok) throw new Error(`constructor failed: ${out.error}`);
   }
@@ -284,7 +284,7 @@ export class ObjRuntime {
         timer = setTimeout(() => res({ ok: false, error: `event exceeded ${this.timeoutMs / 1000}s wall clock` }), this.timeoutMs);
       });
       this.mode = Mode.Sandbox;
-      (globalThis as any).__pdo.dispatch(id, ev);
+      (globalThis as any).__perch.dispatch(id, ev);
       out = await Promise.race([settled, timeout]);
       clearTimeout(timer);
     } catch (e: any) {
@@ -297,7 +297,7 @@ export class ObjRuntime {
     try {
       while (this.savepoint > 0) {
         const n = this.savepoint--;
-        db.exec(`ROLLBACK TO pdo_tx_${n}; RELEASE pdo_tx_${n}`);
+        db.exec(`ROLLBACK TO perch_tx_${n}; RELEASE perch_tx_${n}`);
       }
       const pn = wasm.alloc(4), pc = wasm.allocPtr();
       let cs = EMPTY;
@@ -324,12 +324,12 @@ export class ObjRuntime {
     return out;
   }
 
-  // ------------------------------------------------------------ the HTTP surface (as `pdo run`)
+  // ------------------------------------------------------------ the HTTP surface (as `perch run`)
 
   private asset(req: Req): Res | null {
     if (req.method !== "GET" && req.method !== "HEAD") return null;
     const u = new URL(req.url);
-    if (u.pathname.startsWith("/.pdo/")) return null;
+    if (u.pathname.startsWith("/.perch/")) return null;
     const r = resolve((p) => p in this.manifest, decodePath(u.pathname));
     if (!r) return null;
     if ("redirect" in r) {
@@ -355,12 +355,12 @@ export class ObjRuntime {
     return { status, headers: [["content-type", "application/json"]], body: new TextEncoder().encode(JSON.stringify(value)) };
   }
 
-  /** Static files first, then `POST /.pdo/rpc/<method>`, then the class's fetch(). */
+  /** Static files first, then `POST /.perch/rpc/<method>`, then the class's fetch(). */
   async fetch(req: Req): Promise<Res> {
     const a = this.asset(req);
     if (a) return a;
     const u = new URL(req.url);
-    const m = u.pathname.match(/^\/\.pdo\/rpc\/([^/]+)$/);
+    const m = u.pathname.match(/^\/\.perch\/rpc\/([^/]+)$/);
     if (m && req.method === "POST") {
       let args: unknown[] = [];
       if (req.body?.length) {

@@ -217,7 +217,7 @@ impl Host {
             }
             Ok(v) => {
                 conn.execute_batch("COMMIT")?;
-                // Fold the WAL into the main file so a plain copy of the .obj is complete.
+                // Fold the WAL into the main file so a plain copy of the .perch is complete.
                 let _ = conn.execute_batch("PRAGMA wal_checkpoint(PASSIVE)");
                 Ok(v)
             }
@@ -238,7 +238,7 @@ impl Host {
             return Ok(None);
         }
         let Ok(u) = url::Url::parse(url) else { return Ok(None) };
-        if u.path().starts_with("/.pdo/") {
+        if u.path().starts_with("/.perch/") {
             return Ok(None);
         }
         let (checkin, manifest) = self.store.live_manifest()?;
@@ -428,7 +428,7 @@ impl Host {
 type Cmd = (Event, oneshot::Sender<Result<Outcome>>);
 
 /// A host running on its own thread (V8 isolates are single-threaded), fed
-/// events over a channel. Used by `pdo run`.
+/// events over a channel. Used by `perch run`.
 #[derive(Clone)]
 pub struct HostHandle {
     tx: mpsc::UnboundedSender<Cmd>,
@@ -445,7 +445,7 @@ impl HostHandle {
 pub fn spawn(path: PathBuf, fire_alarms: bool, echo_logs: bool) -> Result<HostHandle> {
     let (tx, mut rx) = mpsc::unbounded_channel::<Cmd>();
     let (ready_tx, ready_rx) = std::sync::mpsc::channel::<Result<()>>();
-    std::thread::Builder::new().name("pdo-object".into()).spawn(move || {
+    std::thread::Builder::new().name("perch-object".into()).spawn(move || {
         let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
         let local = tokio::task::LocalSet::new();
         local.block_on(&rt, async move {
@@ -459,7 +459,7 @@ pub fn spawn(path: PathBuf, fire_alarms: bool, echo_logs: bool) -> Result<HostHa
             // A class that fails to load is reported, not fatal: static files
             // still serve, and each fetch/RPC retries the load and returns the error.
             if let Err(e) = host.ensure().await {
-                eprintln!("pdo: warning: the object's code did not load: {e:#}");
+                eprintln!("perch: warning: the object's code did not load: {e:#}");
             }
             let _ = ready_tx.send(Ok(()));
             loop {

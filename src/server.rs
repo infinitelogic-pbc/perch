@@ -1,5 +1,5 @@
-//! `pdo run`: serve one object over HTTP. Every request goes to fetch();
-//! `POST /.pdo/rpc/<method>` with a JSON array body calls a public method.
+//! `perch run`: serve one object over HTTP. Every request goes to fetch();
+//! `POST /.perch/rpc/<method>` with a JSON array body calls a public method.
 
 use std::net::SocketAddr;
 
@@ -77,11 +77,11 @@ async fn rpc(State(h): State<HostHandle>, Path(method): Path<String>, body: Byte
 
 pub async fn serve(h: HostHandle, addr: SocketAddr) -> Result<()> {
     let app = Router::new()
-        .route("/.pdo/rpc/{method}", post(rpc))
+        .route("/.perch/rpc/{method}", post(rpc))
         .fallback(fetch)
         .with_state(h);
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    eprintln!("pdo: serving on http://{}", listener.local_addr()?);
+    eprintln!("perch: serving on http://{}", listener.local_addr()?);
     axum::serve(listener, app).await?;
     Ok(())
 }

@@ -43,7 +43,7 @@ pub struct EngineState {
     pub alarm_touched: bool,
     /// This event is a read: every write op is refused (read_object).
     pub read_only: bool,
-    /// Echo log lines to stderr as they happen (pdo run).
+    /// Echo log lines to stderr as they happen (perch run).
     pub echo_logs: bool,
 }
 
@@ -201,17 +201,17 @@ fn op_txn(state: &mut OpState, #[string] action: String) -> Result<(), JsErrorBo
     let sql = match action.as_str() {
         "begin" => {
             s.savepoint += 1;
-            format!("SAVEPOINT pdo_tx_{}", s.savepoint)
+            format!("SAVEPOINT perch_tx_{}", s.savepoint)
         }
         "commit" => {
-            let q = format!("RELEASE pdo_tx_{}", s.savepoint);
+            let q = format!("RELEASE perch_tx_{}", s.savepoint);
             s.savepoint -= 1;
             q
         }
         "rollback" => {
             let n = s.savepoint;
             s.savepoint -= 1;
-            format!("ROLLBACK TO pdo_tx_{n}; RELEASE pdo_tx_{n}")
+            format!("ROLLBACK TO perch_tx_{n}; RELEASE perch_tx_{n}")
         }
         _ => return Err(err("bad txn action")),
     };
@@ -446,7 +446,7 @@ fn op_event_error(state: &mut OpState, #[smi] id: u32, #[string] message: String
 }
 
 deno_core::extension!(
-    pdo_ext,
+    perch_ext,
     ops = [
         op_sql_exec,
         op_db_size,
@@ -473,25 +473,25 @@ deno_core::extension!(
 
 // ---------------------------------------------------------------- modules
 
-const PDO_TEST: &str = r#"
-export const test = globalThis.__pdo.testApi.test;
+const PERCH_TEST: &str = r#"
+export const test = globalThis.__perch.testApi.test;
 export const it = test;
-export const expect = globalThis.__pdo.testApi.expect;
+export const expect = globalThis.__perch.testApi.expect;
 export const describe = (_name, fn) => fn();
 "#;
 
 const CLOUDFLARE_WORKERS: &str = r#"
-export const DurableObject = globalThis.__pdo.DurableObject;
-export const WorkerEntrypoint = globalThis.__pdo.WorkerEntrypoint;
-export const RpcTarget = globalThis.__pdo.RpcTarget;
-export const env = globalThis.__pdo.env;
+export const DurableObject = globalThis.__perch.DurableObject;
+export const WorkerEntrypoint = globalThis.__perch.WorkerEntrypoint;
+export const RpcTarget = globalThis.__perch.RpcTarget;
+export const env = globalThis.__perch.env;
 export default { DurableObject, WorkerEntrypoint, RpcTarget, env };
 "#;
 
 /// Strip TypeScript types. Returns (javascript, source map).
 pub fn transpile(path: &str, code: &str) -> Result<(String, Option<Vec<u8>>)> {
     use deno_ast::{MediaType, ParseParams, SourceMapOption};
-    let spec = ModuleSpecifier::parse(&format!("pdo:///{path}"))?;
+    let spec = ModuleSpecifier::parse(&format!("perch:///{path}"))?;
     let media_type = MediaType::from_specifier(&spec);
     let needs = matches!(
         media_type,
@@ -530,7 +530,7 @@ pub fn transpile(path: &str, code: &str) -> Result<(String, Option<Vec<u8>>)> {
 
 struct ObjectLoader {
     files: Files,
-    /// Test files may import "pdo:test"; object code may not.
+    /// Test files may import "perch:test"; object code may not.
     test_mode: bool,
     source_maps: RefCell<HashMap<String, Vec<u8>>>,
 }
@@ -558,15 +558,15 @@ impl ModuleLoader for ObjectLoader {
         if specifier.starts_with("cloudflare:") {
             return ModuleSpecifier::parse(specifier).map_err(JsErrorBox::from_err);
         }
-        if specifier == "pdo:test" {
-            if !self.test_mode || !referrer.starts_with("pdo:///test/") {
-                return Err(JsErrorBox::generic("pdo:test can only be imported by files under test/, when tests run"));
+        if specifier == "perch:test" {
+            if !self.test_mode || !referrer.starts_with("perch:///test/") {
+                return Err(JsErrorBox::generic("perch:test can only be imported by files under test/, when tests run"));
             }
             return ModuleSpecifier::parse(specifier).map_err(JsErrorBox::from_err);
         }
-        if !(specifier.starts_with("./") || specifier.starts_with("../") || specifier.starts_with("pdo:")) {
+        if !(specifier.starts_with("./") || specifier.starts_with("../") || specifier.starts_with("perch:")) {
             return Err(JsErrorBox::generic(format!(
-                "cannot import {specifier:?}: pdo v0 loads only files inside the object (relative imports) and cloudflare:workers; vendor the package into the object"
+                "cannot import {specifier:?}: perch v0 loads only files inside the object (relative imports) and cloudflare:workers; vendor the package into the object"
             )));
         }
         deno_core::resolve_import(specifier, referrer).map_err(JsErrorBox::from_err)
@@ -574,11 +574,11 @@ impl ModuleLoader for ObjectLoader {
 
     fn load(&self, spec: &ModuleSpecifier, _r: Option<&ModuleLoadReferrer>, _o: ModuleLoadOptions) -> ModuleLoadResponse {
         let r = (|| -> Result<ModuleSource, ModuleLoaderError> {
-            let code = if spec.as_str() == "pdo:test" {
-                PDO_TEST.to_string()
+            let code = if spec.as_str() == "perch:test" {
+                PERCH_TEST.to_string()
             } else if spec.scheme() == "cloudflare" {
                 if spec.path() != "workers" {
-                    return Err(JsErrorBox::generic(format!("{spec} is not available in pdo v0")));
+                    return Err(JsErrorBox::generic(format!("{spec} is not available in perch v0")));
                 }
                 CLOUDFLARE_WORKERS.to_string()
             } else {
@@ -589,7 +589,7 @@ impl ModuleLoader for ObjectLoader {
                 let src = &String::from_utf8(bytes.clone())
                     .map_err(|_| JsErrorBox::generic(format!("{found} is not UTF-8 text, so it cannot be imported")))?;
                 // Text modules: the file's contents as the default export, the way
-                // wrangler treats .html/.txt/.sql (pdo export adds rules for the rest).
+                // wrangler treats .html/.txt/.sql (perch export adds rules for the rest).
                 let ext = found.rsplit_once('.').map(|(_, e)| e).unwrap_or("");
                 if TEXT_MODULE_EXTS.contains(&ext) {
                     let code = format!("export default {};\n", serde_json::to_string(src).unwrap());
@@ -656,7 +656,7 @@ impl Engine {
         };
         let mut rt = JsRuntime::new(RuntimeOptions {
             module_loader: Some(Rc::new(loader)),
-            extensions: vec![pdo_ext::init()],
+            extensions: vec![perch_ext::init()],
             ..Default::default()
         });
         rt.op_state().borrow_mut().put(EngineState {
@@ -670,15 +670,15 @@ impl Engine {
             read_only: false,
             echo_logs,
         });
-        rt.execute_script("pdo:bootstrap.js", include_str!("../js/bootstrap.js"))
+        rt.execute_script("perch:bootstrap.js", include_str!("../js/bootstrap.js"))
             .map_err(|e| anyhow!("bootstrap: {e}"))?;
-        let main_spec = ModuleSpecifier::parse("pdo:///__pdo_main__.js")?;
+        let main_spec = ModuleSpecifier::parse("perch:///__perch_main__.js")?;
         let mut code = format!(
-            "import * as mod from \"pdo:///{main}\";\nglobalThis.__pdo.setModule(mod);\n"
+            "import * as mod from \"perch:///{main}\";\nglobalThis.__perch.setModule(mod);\n"
         );
         for t in tests {
             let t = serde_json::to_string(t)?;
-            code.push_str(&format!("globalThis.__pdo.beginTestFile({t});\nawait import(\"pdo:///\" + {t});\n"));
+            code.push_str(&format!("globalThis.__perch.beginTestFile({t});\nawait import(\"perch:///\" + {t});\n"));
         }
         // Top-level module code runs sandboxed too.
         let old = mode.set(Mode::Sandbox);
@@ -723,9 +723,9 @@ impl Engine {
                 es.bodies.insert(id, b);
             }
         }
-        let script = format!("globalThis.__pdo.dispatch({id}, {});", serde_json::to_string(&event)?);
+        let script = format!("globalThis.__perch.dispatch({id}, {});", serde_json::to_string(&event)?);
         self.rt
-            .execute_script("pdo:dispatch.js", script)
+            .execute_script("perch:dispatch.js", script)
             .map_err(|e| anyhow!("dispatch: {e}"))?;
         let take = |rt: &mut JsRuntime| {
             let state = rt.op_state();
@@ -761,7 +761,7 @@ impl Engine {
         while es.savepoint > 0 {
             let n = es.savepoint;
             let old = es.mode.set(Mode::Privileged);
-            let _ = es.conn.execute_batch(&format!("ROLLBACK TO pdo_tx_{n}; RELEASE pdo_tx_{n}"));
+            let _ = es.conn.execute_batch(&format!("ROLLBACK TO perch_tx_{n}; RELEASE perch_tx_{n}"));
             es.mode.set(old);
             es.savepoint -= 1;
         }

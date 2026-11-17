@@ -3,12 +3,12 @@ import Base from '../layouts/Base.astro';
 import { RESERVED } from '../lib/facts';
 ---
 <Base
-  title="The format: pdo"
+  title="The format: perch"
   description="Inside a portable durable object file: the reserved _obj_ tables that hold code, history, migrations, KV, the alarm and changesets, and the data tables that belong to the object."
 >
   <div class="wrap head stack">
-    <p class="eyebrow">Format version 1 · api pdo-v0</p>
-    <h1>Inside a <code>.obj</code> file.</h1>
+    <p class="eyebrow">Format version 1 · api perch-v0</p>
+    <h1>Inside a <code>.perch</code> file.</h1>
     <p class="lede">
       An object file is an ordinary SQLite database. Open it with <code>sqlite3</code> and you can
       read all of it. Seven tables whose names start with <code>_obj_</code> belong to the runtime.

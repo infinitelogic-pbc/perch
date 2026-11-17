@@ -7,7 +7,7 @@ interface Props {
 }
 const { title, description } = Astro.props;
 const nav = [
-  { href: '/', label: 'pdo' },
+  { href: '/', label: 'perch' },
   { href: '/run', label: 'run' },
   { href: '/format', label: 'the format' },
   { href: '/llms.txt', label: 'llms.txt' },
@@ -50,7 +50,7 @@ const here = Astro.url.pathname.replace(/\.html$/, '').replace(/\/$/, '') || '/'
     <footer>
       <div class="wrap">
         <p>
-          <span class="mono">pdo</span>, portable durable objects. A prototype in Rust (V8 through
+          <span class="mono">perch</span>, portable durable objects. A prototype in Rust (V8 through
           deno_core, SQLite through rusqlite), Apache-2.0.
         </p>
         <p class="small">No analytics, no cookies, no third-party requests.</p>

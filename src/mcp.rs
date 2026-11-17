@@ -17,14 +17,14 @@ Workflow: describe_object → read_code → propose_change (code + tests + migra
 
 Writing the object:
 - The entry file is src/index.ts. It exports the object's class (the name describe_object reports) extending DurableObject from "cloudflare:workers". Constructor signature is (ctx, env); call super(ctx, env).
-- Handlers: async fetch(request: Request): Promise<Response>; public methods are RPC (callable over HTTP as POST /.pdo/rpc/<method> with a JSON array of args); async alarm() runs when ctx.storage.setAlarm(epochMs) comes due.
+- Handlers: async fetch(request: Request): Promise<Response>; public methods are RPC (callable over HTTP as POST /.perch/rpc/<method> with a JSON array of args); async alarm() runs when ctx.storage.setAlarm(epochMs) comes due.
 - Storage: this.ctx.storage.sql.exec(sql, ...bindings) returns a cursor (.toArray(), .one(), .raw(), rowsWritten). this.ctx.storage.get/put/delete/list is the key-value half. ctx.storage.transactionSync(fn) for atomic multi-statement writes. Every event already runs in its own transaction.
 - Schema changes go ONLY in propose_change migrations (ordered, forward-only SQL). Object code cannot CREATE/ALTER/DROP, and cannot touch _obj_* tables.
 - Data tables need a declared PRIMARY KEY; use UUIDv7 TEXT keys (crypto.randomUUID() is v4; build v7 from Date.now() + crypto.getRandomValues) rather than INTEGER/AUTOINCREMENT so copies of the file can merge changesets later.
 - Web pages: files under public/ are static and served before fetch() without waking the object (public/index.html at /, public/about.html at /about, public/docs/index.html at /docs/; /about.html redirects to /about; GET/HEAD only; ETag + 304). Unmatched requests go to fetch(). Binary files (images, fonts) are { "base64": "..." } in propose_change. Templates for dynamic pages can be imported as strings: import page from "./page.html" (also .txt .sql .css .md .svg). The same layout exports to Cloudflare Static Assets unchanged.
 - Editing: after the first version, change files with propose_change `edits` (exact old/new string replacement) instead of resending whole files.
 - Tests: put tests in test/*.ts. They run on every propose_change and release_change refuses while any fail. Each test gets a fresh, empty copy of the object:
-    import { test, expect } from "pdo:test";
+    import { test, expect } from "perch:test";
     test("adds an item", async (obj) => {
       const res = await obj.fetch("/todos", { body: { title: "milk" } });   // object body = JSON POST
       expect(res.status).toBe(201);
@@ -36,7 +36,7 @@ Writing the object:
   obj has fetch(path, init), rpc(method, ...args), alarm(), sql(query, ...bindings) for seeding and assertions, storage, and clock.set/advance/now. expect has toBe, toEqual, toBeTruthy, toBeFalsy, toBeNull, toBeDefined, toContain, toHaveLength, toBeGreaterThan, toBeLessThan, toMatch, and .not. Write tests for the behavior the user asked for, so later changes cannot quietly break it.
 - Undo: every write is recorded. list_changes shows recent data changes; undo_changes reverses them (not across a migration).
 - Available globals: Request, Response, Headers, URL, URLSearchParams, TextEncoder/TextDecoder, crypto.randomUUID/getRandomValues, setTimeout, structuredClone, atob/btoa, console (logs come back in test_call). Not yet: outbound fetch, WebSockets, env bindings, npm imports (relative imports between files in the object work).
-- Keep the class Cloudflare-compatible: the same source deploys unchanged with `pdo export` + wrangler."#;
+- Keep the class Cloudflare-compatible: the same source deploys unchanged with `perch export` + wrangler."#;
 
 fn tools_list() -> Value {
     // Reads and writes are separate tools. The write tools take only unsafe
@@ -238,7 +238,7 @@ async fn call_tool(tools: &mut Tools, name: &str, args: Value) -> Result<Value> 
         "call_object" => {
             let c: CallArgs = serde_json::from_value(args)?;
             if c.kind == "alarm" {
-                anyhow::bail!("call_object takes fetch or rpc; alarms fire on schedule (pdo run), or use test_call on the preview");
+                anyhow::bail!("call_object takes fetch or rpc; alarms fire on schedule (perch run), or use test_call on the preview");
             }
             tools.call_object(c).await
         }
@@ -275,7 +275,7 @@ pub async fn serve(path: PathBuf) -> Result<()> {
                 Ok(json!({
                     "protocolVersion": v,
                     "capabilities": { "tools": { "listChanged": false } },
-                    "serverInfo": { "name": "pdo", "title": "Portable Durable Object", "version": env!("CARGO_PKG_VERSION") },
+                    "serverInfo": { "name": "perch", "title": "Portable Durable Object", "version": env!("CARGO_PKG_VERSION") },
                     "instructions": GUIDE,
                 }))
             }

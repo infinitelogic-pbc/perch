@@ -1,12 +1,12 @@
 [package]
-name = "pdo"
+name = "perch"
 version = "0.1.0"
 edition = "2024"
 description = "Portable Durable Objects: one SQLite file holding a Durable Object's code and data"
 license = "Apache-2.0"
 
 [[bin]]
-name = "pdo"
+name = "perch"
 path = "src/main.rs"
 
 [dependencies]

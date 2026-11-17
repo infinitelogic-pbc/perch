@@ -1,8 +1,8 @@
 // The same HTTP calls against any host serving a freshly created to-do object:
-// `pdo run` locally, or the `pdo export` deploy on Cloudflare.
+// `perch run` locally, or the `perch export` deploy on Cloudflare.
 //
 //   bun test/http-calls.ts http://127.0.0.1:8787
-//   bun test/http-calls.ts https://pdo-todo-demo.<account>.workers.dev
+//   bun test/http-calls.ts https://perch-todo-demo.<account>.workers.dev
 
 const base = process.argv[2];
 if (!base) throw new Error("usage: bun test/http-calls.ts <base url>");
@@ -17,7 +17,7 @@ function ok(cond: unknown, what: string) {
   console.log(`ok   ${what}`);
 }
 const rpc = async (m: string, ...args: unknown[]) => {
-  const r = await fetch(`${base}/.pdo/rpc/${m}`, { method: "POST", body: JSON.stringify(args) });
+  const r = await fetch(`${base}/.perch/rpc/${m}`, { method: "POST", body: JSON.stringify(args) });
   return { status: r.status, body: (await r.json()) as any };
 };
 const json = { "content-type": "application/json" };

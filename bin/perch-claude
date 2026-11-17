@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+# Open a Claude session hooked to one portable durable object.
+#
+#   perch-claude my.perch                 # creates my.perch (empty class) if it is missing
+#   perch-claude my.perch --class Shop    # class name for a new object
+#   perch-claude my.perch -- --model sonnet "build a guestbook"   # extra args go to claude
+#
+# Claude starts in a fresh, empty temp directory with only this object's MCP
+# tools attached, so it works on the object and nothing else.
+set -euo pipefail
+
+usage() { sed -n '2,9p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+
+obj="" class="" claude_args=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -h|--help) usage ;;
+    --class) class="${2:?--class needs a name}"; shift 2 ;;
+    --) shift; claude_args=("$@"); break ;;
+    -*) echo "perch-claude: unknown option $1" >&2; usage 2 ;;
+    *) [ -z "$obj" ] || { echo "perch-claude: one object file at a time" >&2; exit 2; }; obj="$1"; shift ;;
+  esac
+done
+[ -n "$obj" ] || usage 2
+
+# Find the perch binary: $PERCH, then this checkout's build, then PATH.
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ -n "${PERCH:-}" ]; then perch="$PERCH"
+elif [ -x "$here/../target/release/perch" ]; then perch="$here/../target/release/perch"
+elif command -v perch >/dev/null 2>&1; then perch="$(command -v perch)"
+else echo "perch-claude: no perch binary. Build it (cd perch && cargo build --release) or set PERCH=/path/to/perch" >&2; exit 1
+fi
+perch="$(cd "$(dirname "$perch")" && pwd)/$(basename "$perch")"
+command -v claude >/dev/null 2>&1 || { echo "perch-claude: the claude CLI is not on PATH" >&2; exit 1; }
+
+if [ ! -e "$obj" ]; then
+  mkdir -p "$(dirname "$obj")"
+  "$perch" new "$obj" ${class:+--class "$class"} >/dev/null
+  echo "perch-claude: created $obj" >&2
+fi
+obj="$(cd "$(dirname "$obj")" && pwd)/$(basename "$obj")"
+"$perch" describe "$obj" >/dev/null   # fail early if it is not an object file
+
+work="$(mktemp -d "${TMPDIR:-/tmp}/perch-claude.XXXXXX")"
+trap 'rm -rf "$work"' EXIT
+esc() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
+config="{\"mcpServers\":{\"perch\":{\"command\":\"$(esc "$perch")\",\"args\":[\"mcp\",\"$(esc "$obj")\"]}}}"
+
+echo "perch-claude: object $obj" >&2
+echo "perch-claude: serve it from another terminal with: $perch run $obj" >&2
+cd "$work"
+claude --strict-mcp-config --mcp-config "$config" ${claude_args[@]+"${claude_args[@]}"}

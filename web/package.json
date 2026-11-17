@@ -1,12 +1,12 @@
 {
-  "name": "@pdo/web",
+  "name": "@perch/web",
   "version": "0.1.0",
   "private": true,
   "type": "module",
   "scripts": {
     "dev": "astro dev",
     "build": "astro build",
-    "example": "rm -f public/examples/todo.obj && ../target/release/pdo new public/examples/todo.obj --class Todo --name todo --from ../examples/todo",
+    "example": "rm -f public/examples/todo.perch && ../target/release/perch new public/examples/todo.perch --class Todo --name todo --from ../examples/todo",
     "test": "bun test/runtime.ts",
     "check": "tsc --noEmit -p tsconfig.json",
     "preview": "astro preview",

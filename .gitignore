@@ -1,8 +1,8 @@
 target/
-*.obj
-*.obj-wal
-*.obj-shm
-*.obj-journal
+*.perch
+*.perch-wal
+*.perch-shm
+*.perch-journal
 *.preview
 *.preview-wal
 *.preview-shm
@@ -11,4 +11,4 @@ node_modules/
 dist/
 
 # The browser runner ships one example object.
-!web/public/examples/*.obj
+!web/public/examples/*.perch

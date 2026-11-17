@@ -34,7 +34,7 @@ const calls = [
 ];
 ---
 <Base
-  title="pdo: portable durable objects"
+  title="perch: portable durable objects"
   description="A portable durable object is one SQLite file holding a Cloudflare-style Durable Object's code and data. Run it locally, edit it over MCP, export it to Cloudflare unchanged."
 >
   <div class="wrap hero split">
@@ -52,9 +52,9 @@ const calls = [
       </p>
     </div>
 
-    <figure class="file" aria-label="Tables inside todo.obj">
+    <figure class="file" aria-label="Tables inside todo.perch">
       <div class="file-head">
-        <span class="mono fname">todo.obj</span>
+        <span class="mono fname">todo.perch</span>
         <span class="mono hex" title="The first 16 bytes of every SQLite database: SQLite format 3">{HEADER}</span>
       </div>
       <ul class="plain rows">
@@ -89,7 +89,7 @@ const calls = [
         <p class="eyebrow">The runtime</p>
         <h2>Open the file, run the class.</h2>
         <p>
-          The <code>pdo</code> binary loads the live check-in’s code into V8 and runs it single-threaded,
+          The <code>perch</code> binary loads the live check-in’s code into V8 and runs it single-threaded,
           one event per SQLite transaction. Every write is recorded as a session changeset in the
           same transaction. The class is an ordinary Durable Object: it extends
           <code>DurableObject</code> from <code>cloudflare:workers</code>.
@@ -123,7 +123,7 @@ const calls = [
         <p class="eyebrow">The MCP loop</p>
         <h2>Agents build objects through {TOOLS.length} tools.</h2>
         <p class="lede">
-          <code>pdo mcp todo.obj</code> speaks MCP over stdio. An agent changes the object on a
+          <code>perch mcp todo.perch</code> speaks MCP over stdio. An agent changes the object on a
           preview copy of the file, live data included, tries it there, then releases. The
           end-to-end test builds the to-do example this way, starting from an empty class.
         </p>
@@ -163,7 +163,7 @@ const calls = [
         <p>
           The same file runs in a tab, with no install and no server. SQLite runs as WebAssembly,
           the object's class runs on the browser's own engine, and a service worker hands the app's
-          requests to it. Nothing is uploaded, and the file you download opens in native pdo.
+          requests to it. Nothing is uploaded, and the file you download opens in native perch.
         </p>
         <p><a href="/run">Run an object in your browser</a></p>
       </div>
@@ -174,22 +174,22 @@ const calls = [
             Each event folds the WAL back into the main file after it commits, so a plain copy is
             the whole object. Run the copy anywhere and it serves the same check-in and the same rows.
           </p>
-          <pre><span class="p">$ </span>cp todo.obj ~/elsewhere/
-<span class="p">$ </span>pdo run ~/elsewhere/todo.obj</pre>
+          <pre><span class="p">$ </span>cp todo.perch ~/elsewhere/
+<span class="p">$ </span>perch run ~/elsewhere/todo.perch</pre>
         </div>
         <div class="stack card">
           <h3>Export to Cloudflare</h3>
           <p>
-            <code>pdo export</code> writes a Wrangler project. The class source is copied byte for
+            <code>perch export</code> writes a Wrangler project. The class source is copied byte for
             byte; a generated wrapper applies the migrations once and gives the same HTTP surface as
-            <code>pdo run</code>, including <code>POST /.pdo/rpc/&lt;method&gt;</code>.
+            <code>perch run</code>, including <code>POST /.perch/rpc/&lt;method&gt;</code>.
           </p>
-          <pre><span class="p">$ </span>pdo export todo.obj out/
+          <pre><span class="p">$ </span>perch export todo.perch out/
 <span class="p">$ </span>cd out && bunx wrangler deploy</pre>
         </div>
       </div>
       <details class="calls">
-        <summary>The same {calls.length} HTTP calls pass on <code>pdo run</code> and on Cloudflare</summary>
+        <summary>The same {calls.length} HTTP calls pass on <code>perch run</code> and on Cloudflare</summary>
         <ol>{calls.map((c) => <li>{c}</li>)}</ol>
       </details>
     </div>
@@ -201,7 +201,7 @@ const calls = [
         <p class="eyebrow">Quick start</p>
         <h2>From a checkout.</h2>
         <p>
-          pdo is a single Rust binary. Build it, make an object, serve it, then hand the same file to
+          perch is a single Rust binary. Build it, make an object, serve it, then hand the same file to
           your agent.
         </p>
         <p class="small">
@@ -210,25 +210,25 @@ const calls = [
         </p>
       </div>
       <pre><span class="c"># build</span>
-<span class="p">$ </span>cd pdo && cargo build --release
+<span class="p">$ </span>cd perch && cargo build --release
 <span class="p">$ </span>export PATH="$PWD/target/release:$PATH"
 
 <span class="c"># a blank object, shaped by an agent over MCP</span>
-<span class="p">$ </span>pdo new hello.obj
-<span class="p">$ </span>claude mcp add hello -- pdo mcp hello.obj
-<span class="p">$ </span>pdo run hello.obj
+<span class="p">$ </span>perch new hello.perch
+<span class="p">$ </span>claude mcp add hello -- perch mcp hello.perch
+<span class="p">$ </span>perch run hello.perch
 
 <span class="c"># or import a directory with src/ and migrations/</span>
-<span class="p">$ </span>pdo new todo.obj --from examples/todo
-<span class="p">$ </span>pdo call todo.obj add '["buy milk"]'
-<span class="p">$ </span>pdo fetch todo.obj /todos
+<span class="p">$ </span>perch new todo.perch --from examples/todo
+<span class="p">$ </span>perch call todo.perch add '["buy milk"]'
+<span class="p">$ </span>perch fetch todo.perch /todos
 
 <span class="c"># give it to an agent (Claude Code shown)</span>
-<span class="p">$ </span>claude mcp add todo -- pdo mcp todo.obj
+<span class="p">$ </span>claude mcp add todo -- perch mcp todo.perch
 
 <span class="c"># look inside</span>
-<span class="p">$ </span>pdo describe todo.obj
-<span class="p">$ </span>pdo checkins todo.obj --diffs</pre>
+<span class="p">$ </span>perch describe todo.perch
+<span class="p">$ </span>perch checkins todo.perch --diffs</pre>
     </div>
   </section>
 

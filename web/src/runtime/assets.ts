@@ -1,6 +1,6 @@
-// Static files: the same rules as pdo/src/assets.rs (Cloudflare Workers Static
+// Static files: the same rules as perch/src/assets.rs (Cloudflare Workers Static
 // Assets defaults), so a page behaves the same in the browser runtime, under
-// `pdo run`, and after `pdo export`.
+// `perch run`, and after `perch export`.
 
 export const PUBLIC_DIR = "public/";
 

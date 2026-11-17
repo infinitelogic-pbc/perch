@@ -1,4 +1,4 @@
-import { test, expect } from "pdo:test";
+import { test, expect } from "perch:test";
 
 const DAY = 24 * 60 * 60 * 1000;
 
@@ -67,7 +67,7 @@ test("key-value storage keeps rich values", async (obj) => {
     negZero: -0,
     missing: undefined,
     nan: NaN,
-    $pdo: "a key that looks like a tag",
+    $perch: "a key that looks like a tag",
     nested: [{ deep: [null, true, "x"] }],
   };
   await obj.storage.put("rich", value);
@@ -79,7 +79,7 @@ test("key-value storage keeps rich values", async (obj) => {
   expect(Object.is(got.negZero, -0)).toBe(true);
   expect("missing" in got && got.missing).toBeUndefined();
   expect(Number.isNaN(got.nan)).toBe(true);
-  expect(got.$pdo).toBe("a key that looks like a tag");
+  expect(got.$perch).toBe("a key that looks like a tag");
   expect(got.nested).toEqual([{ deep: [null, true, "x"] }]);
   // Stored as plain JSON text, readable by any runtime.
   const cyc: any = {};

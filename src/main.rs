@@ -1,4 +1,4 @@
-//! pdo: portable durable objects. One SQLite file holds a Durable Object's
+//! perch: portable durable objects. One SQLite file holds a Durable Object's
 //! code and data; this binary creates, runs and edits them.
 
 mod assets;
@@ -21,7 +21,7 @@ use crate::store::{Migration, Store};
 use crate::tools::{CallArgs, Tools};
 
 #[derive(Parser)]
-#[command(name = "pdo", version, about = "Portable Durable Objects: one SQLite file holding a Durable Object's code and data")]
+#[command(name = "perch", version, about = "Portable Durable Objects: one SQLite file holding a Durable Object's code and data")]
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,
@@ -86,7 +86,7 @@ enum Cmd {
     Export {
         file: PathBuf,
         out: PathBuf,
-        /// Worker name (default pdo-<object name>)
+        /// Worker name (default perch-<object name>)
         #[arg(long)]
         worker_name: Option<String>,
     },

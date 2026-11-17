@@ -1,6 +1,6 @@
-// Open any .obj in the /run page in headless Chrome and click around.
+// Open any .perch in the /run page in headless Chrome and click around.
 // The file is uploaded to the page, never written.
-//   bun test/smoke.ts <file.obj> [base-url]
+//   bun test/smoke.ts <file.perch> [base-url]
 
 import puppeteer from "puppeteer-core";
 

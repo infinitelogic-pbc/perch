@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 pub const FORMAT_VERSION: i64 = 1;
-pub const API_VERSION: &str = "pdo-v0";
+pub const API_VERSION: &str = "perch-v0";
 pub const DEFAULT_MAIN: &str = "src/index.ts";
 
 /// Who is running SQL right now. The authorizer reads this on every statement.

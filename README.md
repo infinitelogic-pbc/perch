@@ -1,7 +1,7 @@
-# pdo: portable durable objects
+# perch: portable durable objects
 
 A portable durable object is one SQLite file holding both a Durable Object's
-data and its code. `pdo` opens the file and runs it like a Cloudflare Durable
+data and its code. `perch` opens the file and runs it like a Cloudflare Durable
 Object, on a laptop, a server or anywhere else, and exposes an MCP wrapper so
 an agent can build and change the object without a separate dev environment.
 
@@ -10,17 +10,17 @@ an agent can build and change the object without a separate dev environment.
 Build once (V8 comes prebuilt through `deno_core`):
 
 ```sh
-cd pdo && cargo build --release
+cd perch && cargo build --release
 ```
 
-Then point `bin/pdo-claude` at an object file. It opens a Claude session in a
+Then point `bin/perch-claude` at an object file. It opens a Claude session in a
 fresh, empty temp directory with only that object's MCP tools attached, and
 creates the object first if the file does not exist:
 
 ```sh
-bin/pdo-claude ~/objects/my.obj                 # new or existing object
-bin/pdo-claude ~/objects/shop.obj --class Shop  # class name for a new one
-bin/pdo-claude my.obj -- --model sonnet "build a guestbook"   # args after -- go to claude
+bin/perch-claude ~/objects/my.perch                 # new or existing object
+bin/perch-claude ~/objects/shop.perch --class Shop  # class name for a new one
+bin/perch-claude my.perch -- --model sonnet "build a guestbook"   # args after -- go to claude
 ```
 
 A new object is an empty class (`export class My extends DurableObject {}`)
@@ -29,31 +29,31 @@ tests and migrations, tries them on a preview copy and releases. In a second
 terminal, serve it while you work:
 
 ```sh
-target/release/pdo run ~/objects/my.obj              # http://127.0.0.1:8787, reloads on every release
-target/release/pdo checkins ~/objects/my.obj --diffs # what the agent changed
+target/release/perch run ~/objects/my.perch              # http://127.0.0.1:8787, reloads on every release
+target/release/perch checkins ~/objects/my.perch --diffs # what the agent changed
 ```
 
-The helper finds the binary at `$PDO`, then this checkout's
-`target/release/pdo`, then `pdo` on `PATH`, and removes the temp directory
+The helper finds the binary at `$PERCH`, then this checkout's
+`target/release/perch`, then `perch` on `PATH`, and removes the temp directory
 when Claude exits. The object file stays where you put it.
 
 ## Commands
 
 ```
-pdo new my.obj --class Obj             # empty class, or --from <dir> with src/ + migrations/
-pdo mcp my.obj                         # MCP over stdio: the agent builds it
-pdo run my.obj --port 8787             # serve HTTP, fire alarms
-pdo call my.obj <method> '[args]'      # RPC from the shell
-pdo fetch my.obj /path                 # one request to fetch()
-pdo describe my.obj                    # tables, code, live check-in, next alarm
-pdo checkins my.obj --diffs            # code history
-pdo test my.obj                        # stored tests, each on a fresh empty copy
-pdo changes my.obj                     # recent data changes
-pdo undo my.obj <id>                   # reverse that change and every newer one
-pdo export my.obj out/ && (cd out && bunx wrangler deploy)
+perch new my.perch --class Obj             # empty class, or --from <dir> with src/ + migrations/
+perch mcp my.perch                         # MCP over stdio: the agent builds it
+perch run my.perch --port 8787             # serve HTTP, fire alarms
+perch call my.perch <method> '[args]'      # RPC from the shell
+perch fetch my.perch /path                 # one request to fetch()
+perch describe my.perch                    # tables, code, live check-in, next alarm
+perch checkins my.perch --diffs            # code history
+perch test my.perch                        # stored tests, each on a fresh empty copy
+perch changes my.perch                     # recent data changes
+perch undo my.perch <id>                   # reverse that change and every newer one
+perch export my.perch out/ && (cd out && bunx wrangler deploy)
 ```
 
-`examples/todo` is a finished object to import (`pdo new todo.obj --class Todo --from examples/todo`).
+`examples/todo` is a finished object to import (`perch new todo.perch --class Todo --from examples/todo`).
 
 ## The file
 
@@ -63,7 +63,7 @@ pdo export my.obj out/ && (cd out && bunx wrangler deploy)
 | `_obj_blobs` | content-addressed bytes (SHA-256 → contents): source files |
 | `_obj_checkins` | code history, Fossil style: id (SHA-256), parent, manifest (path → blob), message, time, schema snapshot |
 | `_obj_migrations` | ordered SQL migrations already applied, each tied to the check-in that introduced it |
-| `_obj_kv` | the key-value half of the storage API. Values are UTF-8 JSON that any runtime can read; what plain JSON cannot carry (Date, Map, Set, bytes, bigint, undefined, NaN) is tagged with `$pdo`. Values written before this in V8's own format are still read by the native binary |
+| `_obj_kv` | the key-value half of the storage API. Values are UTF-8 JSON that any runtime can read; what plain JSON cannot carry (Date, Map, Set, bytes, bigint, undefined, NaN) is tagged with `$perch`. Values written before this in V8's own format are still read by the native binary |
 | `_obj_alarms` | the next scheduled alarm and its retry count |
 | `_obj_changes` | a session-extension changeset for every event that wrote data (audit log, later undo and sync) |
 | everything else | the object's data, created and changed only by migrations |
@@ -78,13 +78,13 @@ Data tables need a declared primary key (the session extension records nothing
 without one, and two copies must never mint the same key). `AUTOINCREMENT` is
 refused; a single `INTEGER PRIMARY KEY` gets a warning. Use UUIDv7 text.
 
-The file runs in WAL mode so `pdo run` and `pdo mcp` can share it, and every
-commit checkpoints the WAL back into the main file, so copying the `.obj`
+The file runs in WAL mode so `perch run` and `perch mcp` can share it, and every
+commit checkpoints the WAL back into the main file, so copying the `.perch`
 alone carries the object.
 
 ## The runtime
 
-`pdo run` loads the class at the live check-in into one V8 isolate and runs
+`perch run` loads the class at the live check-in into one V8 isolate and runs
 events one at a time. Each event (constructor, `fetch`, an RPC call, `alarm`)
 is one SQLite transaction with a session attached; its changeset goes into
 `_obj_changes` before commit. Writes made before a handler throws are kept, as
@@ -94,7 +94,7 @@ process), the next event rebuilds the isolate and reruns the constructor.
 | Capability | API | v0 |
 | --- | --- | --- |
 | HTTP | `fetch(request)` | yes |
-| RPC | public methods; over HTTP as `POST /.pdo/rpc/<method>` with a JSON array of args | yes |
+| RPC | public methods; over HTTP as `POST /.perch/rpc/<method>` with a JSON array of args | yes |
 | SQL storage | `ctx.storage.sql.exec` (cursor: `toArray`, `one`, `raw`, `rowsRead`, `rowsWritten`) | yes |
 | KV storage | `ctx.storage.get/put/delete/list/deleteAll` | yes |
 | Transactions | `ctx.storage.transactionSync`, `ctx.storage.transaction` | yes |
@@ -117,7 +117,7 @@ Files under `public/` are served as-is at the matching URL path, before
 that fails to load still serves its static files.
 
 The rules are Cloudflare Workers Static Assets' defaults, so a page behaves
-the same under `pdo run` and after `pdo export`:
+the same under `perch run` and after `perch export`:
 
 | Request | Result |
 | --- | --- |
@@ -140,7 +140,7 @@ usually from an imported template (`examples/todo` serves its UI from
 
 ## The MCP wrapper
 
-`pdo mcp todo.obj` serves one fixed tool set for every object, each with a
+`perch mcp todo.perch` serves one fixed tool set for every object, each with a
 title and annotations; reads and writes are separate tools. The `initialize`
 result carries a short guide to writing an object.
 
@@ -150,7 +150,7 @@ result carries a short guide to writing an object.
 | `read_code` | readOnly | files at a check-in (live, `preview`, or an id prefix); binary as `{ base64 }` by path |
 | `list_checkins` | readOnly | history and the migrations each check-in added; unified diffs on request |
 | `query_data` | readOnly | read-only SQL over data tables, live or preview, 500 rows max |
-| `propose_change` | destructive | whole files, `edits` (exact old/new string replacements) and new migrations, applied to a preview copy (`todo.obj.preview`, live data included) and built there: modules load, the constructor runs, stored tests run. Proposals stack; `restart: true` starts from live |
+| `propose_change` | destructive | whole files, `edits` (exact old/new string replacements) and new migrations, applied to a preview copy (`todo.perch.preview`, live data included) and built there: modules load, the constructor runs, stored tests run. Proposals stack; `restart: true` starts from live |
 | `test_call` | destructive | a write call on the preview: POST/PUT/PATCH/DELETE to fetch(), an RPC method, or alarm(); returns the result, logs and rows changed per table |
 | `read_object` | readOnly | a read of live or the preview: GET/HEAD to fetch() or `public/`, or an RPC method. Enforced by the runtime: any SQL write, KV write or alarm change is refused and the transaction is rolled back |
 | `run_tests` | readOnly | runs `test/*.ts`, each test on its own fresh empty copy of the object |
@@ -179,7 +179,7 @@ code, every migration replayed, no data), so results never depend on live
 data, and a clock it controls:
 
 ```ts
-import { test, expect } from "pdo:test";
+import { test, expect } from "perch:test";
 
 test("cleanup removes items done for over a day", async (obj) => {
   const item = await obj.rpc("add", "old");          // public methods, as RPC
@@ -195,7 +195,7 @@ test("cleanup removes items done for over a day", async (obj) => {
 `obj` has `fetch`, `rpc`, `alarm`, `sql` (seeding and assertions), `storage`
 and `clock.set/advance/now`. `expect` has `toBe`, `toEqual`, `toBeTruthy`,
 `toBeFalsy`, `toBeNull`, `toBeDefined`, `toContain`, `toHaveLength`,
-`toBeGreaterThan`, `toBeLessThan`, `toMatch` and `.not`. `pdo test my.obj`
+`toBeGreaterThan`, `toBeLessThan`, `toMatch` and `.not`. `perch test my.perch`
 runs them from the shell (exit 1 on failure); `examples/todo/test` has seven.
 
 **Data undo.** Every event's changeset is already in `_obj_changes`.
@@ -203,9 +203,9 @@ runs them from the shell (exit 1 on failure); `examples/todo/test` has seven.
 every newer one, newest first, in one transaction, restoring rows and KV
 values (alarms are not restored). It aborts untouched if a change no longer
 applies cleanly, is refused across a migration, and is recorded as a change
-itself, so an undo can be undone. A running `pdo run` rebuilds its isolate on
-the next event so in-memory state matches. From the shell: `pdo changes`,
-`pdo undo my.obj <id>`.
+itself, so an undo can be undone. A running `perch run` rebuilds its isolate on
+the next event so in-memory state matches. From the shell: `perch changes`,
+`perch undo my.perch <id>`.
 
 ## Claude connector directory rules
 
@@ -214,7 +214,7 @@ The tool set follows Anthropic's
 and [Software Directory Policy](https://support.claude.com/en/articles/13145358-anthropic-software-directory-policy),
 checked by the end-to-end suite:
 
-| Rule | How pdo meets it |
+| Rule | How perch meets it |
 | --- | --- |
 | Every tool has a `title` and `readOnlyHint: true` or `destructiveHint: true` | All thirteen do, exactly one each. Seven are read-only; the six that modify anything (including the preview copy) are destructive |
 | No tool accepts both safe and unsafe HTTP methods | `read_object` takes only GET and HEAD; `test_call` and `call_object` take only POST, PUT, PATCH and DELETE, and each refuses the other's methods with the name of the right tool |
@@ -224,14 +224,14 @@ checked by the end-to-end suite:
 | Descriptions say what the tool does, and match it | No instructions to call other software, no behavior outside the tool |
 | Errors are actionable | Refusals say why and what to do instead; no bare "Bad Request" |
 | Responses are sized to the task | `list_checkins` leaves diffs out unless asked; `read_code` stubs large and binary files in the full listing and caps one file at 512 KiB; `query_data` returns at most 500 rows; tool text is compact JSON |
-| No conversation data collected | pdo stores only what tools are asked to store |
+| No conversation data collected | perch stores only what tools are asked to store |
 
 What a directory submission still needs, beyond the tools:
 
 - **A remote server.** The directory accepts only remote MCP servers over
-  HTTPS (Streamable HTTP), with OAuth 2.0 when sign-in is needed. `pdo mcp` is
+  HTTPS (Streamable HTTP), with OAuth 2.0 when sign-in is needed. `perch mcp` is
   local stdio today, so it can be listed only inside a plugin until there is a
-  hosted pdo (the server mode on the not-yet list, plus HTTP transport and
+  hosted perch (the server mode on the not-yet list, plus HTTP transport and
   OAuth).
 - **Listing materials:** a public documentation URL, a privacy policy URL, a
   support contact, an icon, at least three example prompts, and a test account
@@ -239,27 +239,27 @@ What a directory submission still needs, beyond the tools:
 
 ## Privacy
 
-`pdo` runs on your machine. It has no telemetry and makes no network requests
-of its own. An object's code and data live in its `.obj` file and nowhere
+`perch` runs on your machine. It has no telemetry and makes no network requests
+of its own. An object's code and data live in its `.perch` file and nowhere
 else; object code cannot make outbound requests (`fetch` throws in v0). The
 MCP server speaks only over stdio to the client that started it, and stores
 only what its tools are asked to store. Data leaves the machine only when you
-send it: `pdo export` followed by `wrangler deploy` uploads the object's code,
+send it: `perch export` followed by `wrangler deploy` uploads the object's code,
 static files and migrations (not its data) to your Cloudflare account, and
-`pdo run --host` exposes the object on the network interface you choose.
+`perch run --host` exposes the object on the network interface you choose.
 
 ## Direction
 
 The next layer is a framework class that lives in an object and turns it into
 an app described as data, so agents configure more and code less. Its default
 interface is a spreadsheet: **tables** are the typed view of the database, and
-**sheets** are the UIs built on those tables. pdo stays the low-level layer
+**sheets** are the UIs built on those tables. perch stays the low-level layer
 underneath.
 
 ## In the browser
 
 The same file runs in a browser tab, with no install and no server:
-[pdo.proc.io/run](https://pdo.proc.io/run). Open or drop a `.obj` and its app
+[perch.proc.io/run](https://perch.proc.io/run). Open or drop a `.perch` and its app
 appears, running on SQLite compiled to WebAssembly and the browser's own
 JavaScript engine. Nothing is uploaded.
 
@@ -271,12 +271,12 @@ JavaScript engine. Nothing is uploaded.
   event.
 - **Pages work as they are.** A service worker routes every request from the
   app's iframe to the object: `public/` files with the Cloudflare rules, then
-  `fetch()`, and `POST /.pdo/rpc/<method>`. Links, forms, `fetch` and images
+  `fetch()`, and `POST /.perch/rpc/<method>`. Links, forms, `fetch` and images
   need no changes.
 - **Saving.** In Chrome and Edge a file opened with the picker or dropped on
   the page is written back in place after each change, once you allow it.
   Everywhere, Download gives you the file. A file changed in the browser opens
-  in native pdo, which can undo those changes like any others.
+  in native perch, which can undo those changes like any others.
 - **Limits.** One object per tab. Alarms fire only while the tab is open. No
   editing tools or MCP yet: it runs objects, it does not build them. Object
   code has no network, and the app's pages can load only from the object
@@ -285,11 +285,11 @@ JavaScript engine. Nothing is uploaded.
 
 ## Cloudflare
 
-`pdo export todo.obj out/` writes the live check-in's files unchanged plus a
-generated `pdo/worker.js` and `wrangler.jsonc`. The wrapper class applies the
-object's migrations once per object (tracked in `_pdo_migrations`), forwards
+`perch export todo.perch out/` writes the live check-in's files unchanged plus a
+generated `perch/worker.js` and `wrangler.jsonc`. The wrapper class applies the
+object's migrations once per object (tracked in `_perch_migrations`), forwards
 `fetch` and `alarm` to the original class, and the entry worker gives the same
-HTTP surface as `pdo run` (`POST /.pdo/rpc/<method>`). `public/` becomes
+HTTP surface as `perch run` (`POST /.perch/rpc/<method>`). `public/` becomes
 Workers Static Assets (`assets.directory`), so Cloudflare serves those files
 from the edge and only unmatched requests reach the worker and the Durable
 Object; a `rules` entry makes `.css`, `.md` and `.svg` text imports work as they
@@ -307,25 +307,25 @@ do locally. Moving state in or out of Cloudflare is not in v0.
   below (annotations, read/write separation, enforced read-only calls) (112 checks).
 - `bun test/http-calls.ts <base>` runs the same 17 HTTP calls (API, RPC, alarm,
   static files, an imported template) against any host; it passes against
-  `pdo run` and against the `pdo export` deploy on Cloudflare.
+  `perch run` and against the `perch export` deploy on Cloudflare.
 - `cargo test` covers the URL-to-file rules.
 - `cd web && bun test/runtime.ts` runs the browser runtime under bun against
-  native pdo in both directions: native builds a file, the WebAssembly runtime
+  native perch in both directions: native builds a file, the WebAssembly runtime
   serves it (static files, fetch, RPC, alarm, the sandbox), and native opens
   what it saved, reads its KV values, undoes one of its changes and passes the
   stored tests (34 checks).
 - `cd web && bun test/browser.ts` drives the real `/run` page in headless
   Chrome: the service worker, the app in its iframe, writes, download, and
-  reopening from disk (23 checks). `bun test/smoke.ts <file.obj>` opens any
+  reopening from disk (23 checks). `bun test/smoke.ts <file.perch>` opens any
   object there and clicks around.
 
 ## Not yet
 
 WebSockets, bindings, a server mode hosting a directory of objects, sync
 between copies (the changesets are recorded for it), moving state to or from
-Cloudflare, and a lease so only one copy is live. `pdo run` and `pdo mcp` on
+Cloudflare, and a lease so only one copy is live. `perch run` and `perch mcp` on
 the same file each hold their own isolate; in-memory fields on the class are
-per process, and only `pdo run` fires alarms. `pdo` and `.obj` are working
+per process, and only `perch run` fires alarms. `perch` and `.perch` are working
 names.
 
 Related: celld (self-hosted Workers and Durable Objects) and Rivet Actors.

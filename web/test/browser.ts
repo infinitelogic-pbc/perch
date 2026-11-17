@@ -1,6 +1,6 @@
 // Real-browser check of the /run page, in headless Chrome:
 // service-worker routing, the app in its iframe, writes, download, and
-// opening a file from disk. The downloaded file goes back to native pdo.
+// opening a file from disk. The downloaded file goes back to native perch.
 //
 //   bunx wrangler dev --port 8799     (in another terminal, after bun run build)
 //   bun test/browser.ts [base-url]
@@ -12,9 +12,9 @@ import { join } from "node:path";
 
 const BASE = process.argv[2] ?? "http://127.0.0.1:8799";
 const ROOT = join(import.meta.dir, "../..");
-const PDO = process.env.PDO ?? join(ROOT, "target/release/pdo");
+const PERCH = process.env.PERCH ?? join(ROOT, "target/release/perch");
 const CHROME = process.env.CHROME ?? "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
-const dir = mkdtempSync(join(tmpdir(), "pdo-browser-"));
+const dir = mkdtempSync(join(tmpdir(), "perch-browser-"));
 
 let n = 0;
 function ok(cond: unknown, what: string) {
@@ -26,8 +26,8 @@ function ok(cond: unknown, what: string) {
   console.log(`ok   ${what}`);
 }
 function sh(args: string[]): any {
-  const r = Bun.spawnSync([PDO, ...args], { stderr: "pipe" });
-  if (r.exitCode !== 0) throw new Error(`pdo ${args.join(" ")}: ${r.stderr.toString()}`);
+  const r = Bun.spawnSync([PERCH, ...args], { stderr: "pipe" });
+  if (r.exitCode !== 0) throw new Error(`perch ${args.join(" ")}: ${r.stderr.toString()}`);
   return JSON.parse(r.stdout.toString());
 }
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -83,14 +83,14 @@ ok((await page.$eval("#path", (e) => (e as HTMLInputElement).value)) === "/stats
 // Clean URLs and the cage.
 const probe = await frame.evaluate(async () => {
   const r = await fetch("/index.html", { redirect: "manual" });
-  const rpc = await (await fetch("/.pdo/rpc/stats", { method: "POST", body: "[]" })).json();
+  const rpc = await (await fetch("/.perch/rpc/stats", { method: "POST", body: "[]" })).json();
   const css = await fetch("/app.css");
   let outside = "allowed";
   try { await fetch("https://example.com/"); } catch { outside = "blocked"; }
   return { redirect: r.type === "opaqueredirect" || r.status === 307, rpc: rpc.result?.total, csp: css.headers.get("content-security-policy"), etag: css.headers.get("etag"), outside };
 });
 ok(probe.redirect, "/index.html redirects, as on Cloudflare");
-ok(probe.rpc === 3, "RPC over /.pdo/rpc works from the page");
+ok(probe.rpc === 3, "RPC over /.perch/rpc works from the page");
 ok(probe.etag && probe.csp?.includes("default-src 'self'"), "responses carry the ETag and the content security policy");
 ok(probe.outside === "blocked", "the object's page cannot fetch another site");
 
@@ -98,7 +98,7 @@ ok(probe.outside === "blocked", "the object's page cannot fetch another site");
 const top = await page.evaluate(async () => (await fetch("/llms.txt")).ok && (await (await fetch("/todos")).status));
 ok(top === 404, "requests from the site's own page still go to the network (/todos is a 404 there)");
 
-// ------------------------------------------------------------------ download, and back to native pdo
+// ------------------------------------------------------------------ download, and back to native perch
 await page.click("details.panel summary");
 const facts = await page.$eval("#facts", (e) => e.textContent ?? "");
 ok(facts.includes("Todo") && /Recorded changes\d+/.test(facts), "the panel shows what is inside the file");
@@ -106,25 +106,25 @@ await page.click("#download");
 let saved = "";
 for (let i = 0; i < 50 && !saved; i++) {
   await sleep(200);
-  saved = readdirSync(dir).find((f) => f.endsWith(".obj")) ?? "";
+  saved = readdirSync(dir).find((f) => f.endsWith(".perch")) ?? "";
 }
-ok(saved === "todo.obj", "Download saves the object as a file");
+ok(saved === "todo.perch", "Download saves the object as a file");
 const out = join(dir, saved);
 const d = sh(["describe", out]);
-ok(d.tables.find((t: any) => t.name === "todos").rows === 3, "native pdo opens the downloaded file and sees the row typed in the browser");
+ok(d.tables.find((t: any) => t.name === "todos").rows === 3, "native perch opens the downloaded file and sees the row typed in the browser");
 const rows = sh(["call", out, "stats"]).result;
-ok(rows.total === 3 && rows.done === 1, "native pdo agrees with the browser about the data");
-ok(sh(["test", out]).passed === 8, "the downloaded file passes its stored tests under native pdo");
+ok(rows.total === 3 && rows.done === 1, "native perch agrees with the browser about the data");
+ok(sh(["test", out]).passed === 8, "the downloaded file passes its stored tests under native perch");
 
 // ------------------------------------------------------------------ open a file from disk
 await page.click("#close");
-sh(["call", out, "add", '["added by native pdo after the download"]']);
+sh(["call", out, "add", '["added by native perch after the download"]']);
 const input = await page.$("#file");
 await (input as any).uploadFile(out);
 frame = await appFrame();
 await frame.waitForFunction(() => document.querySelectorAll("#list li").length === 4, { timeout: 15000 });
-ok(true, "the file opens again from disk, with the row native pdo added in between");
-ok((await page.$eval("#obj-name", (e) => e.textContent)) === "todo.obj", "the runner shows the file's name");
+ok(true, "the file opens again from disk, with the row native perch added in between");
+ok((await page.$eval("#obj-name", (e) => e.textContent)) === "todo.perch", "the runner shows the file's name");
 
 // Two errors are expected: this test asks for an outside site (blocked) and for /todos from the top page (404).
 const real = errors.filter((e) => !e.includes("example.com") && !e.includes("Content Security Policy") && !e.endsWith("/todos"));

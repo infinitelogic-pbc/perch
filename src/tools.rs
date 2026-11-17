@@ -538,7 +538,7 @@ impl Tools {
                 }
                 Event::Fetch {
                     method,
-                    url: format!("http://{name}.pdo.local{path}"),
+                    url: format!("http://{name}.perch.local{path}"),
                     headers,
                     body,
                 }
@@ -751,18 +751,18 @@ impl Tools {
         let test_files: Vec<String> = files.keys().filter(|p| is_test_file(p)).cloned().collect();
         let which = if use_preview { "preview" } else { "live" };
         if test_files.is_empty() {
-            return Ok(json!({ "ok": true, "target": which, "total": 0, "passed": 0, "failed": 0, "results": [], "note": "no test files; add test/*.ts that import { test, expect } from \"pdo:test\"" }));
+            return Ok(json!({ "ok": true, "target": which, "total": 0, "passed": 0, "failed": 0, "results": [], "note": "no test files; add test/*.ts that import { test, expect } from \"perch:test\"" }));
         }
         let migrations: Vec<Migration> = s.migrations()?.into_iter().map(|m| Migration { name: m.1, sql: m.2 }).collect();
         let (name, class) = (s.meta_req("name")?, s.meta_req("class")?);
-        let dir = std::env::temp_dir().join(format!("pdo-test-{}", uuid::Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("perch-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir)?;
         let r = async {
             // One empty template, copied per test.
-            let template = dir.join("template.obj");
+            let template = dir.join("template.perch");
             drop(Store::create(&template, &name, &class, &files, &migrations, "test")?);
             let fresh = |i: usize| -> Result<PathBuf> {
-                let p = dir.join(format!("t{i}.obj"));
+                let p = dir.join(format!("t{i}.perch"));
                 std::fs::copy(&template, &p)?;
                 Ok(p)
             };
@@ -934,7 +934,7 @@ impl Tools {
     }
 }
 
-/// Directories `pdo new --from` reads object files from.
+/// Directories `perch new --from` reads object files from.
 pub const OBJECT_DIRS: &[&str] = &["src", "public", "test"];
 
 pub fn is_test_file(path: &str) -> bool {

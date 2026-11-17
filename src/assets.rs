@@ -2,7 +2,7 @@
 //! the matching URL path, before fetch() and without waking the object. The
 //! rules copy Cloudflare Workers Static Assets' defaults (html_handling
 //! "auto-trailing-slash", not_found_handling "none", worker not first) so a
-//! page behaves the same under `pdo run` and after `pdo export`.
+//! page behaves the same under `perch run` and after `perch export`.
 
 use crate::store::{Manifest, PUBLIC_DIR};
 

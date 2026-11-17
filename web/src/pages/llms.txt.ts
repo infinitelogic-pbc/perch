@@ -3,15 +3,15 @@ import type { APIRoute } from 'astro';
 import { TAGLINE, RESERVED, TOOLS, COMMANDS, RUNTIME, NOT_YET } from '../lib/facts';
 
 export const GET: APIRoute = ({ site }) => {
-  const base = (site ?? new URL('https://pdo.proc.io')).origin;
+  const base = (site ?? new URL('https://perch.proc.io')).origin;
 
-  const body = `# pdo (portable durable objects)
+  const body = `# perch (portable durable objects)
 
-> ${TAGLINE} The \`pdo\` binary (Rust, V8 via deno_core, SQLite via rusqlite)
+> ${TAGLINE} The \`perch\` binary (Rust, V8 via deno_core, SQLite via rusqlite)
 > runs the object locally, exposes it to agents over MCP, and exports it to
 > Cloudflare with the class source unchanged.
 
-Version 0.1.0. File format_version 1, api_version pdo-v0.
+Version 0.1.0. File format_version 1, api_version perch-v0.
 
 ## The file
 
@@ -42,9 +42,9 @@ ${RUNTIME.map((r) => `- ${r.api}: ${r.note}`).join('\n')}
   tables, DDL (CREATE/ALTER/DROP), BEGIN/COMMIT/SAVEPOINT, ATTACH, and all
   pragmas except read-only introspection (table_info, table_xinfo,
   table_list, index_list, index_info, index_xinfo, foreign_key_list).
-- Keep the class Cloudflare-compatible: \`pdo export\` deploys the same source.
+- Keep the class Cloudflare-compatible: \`perch export\` deploys the same source.
 
-## HTTP surface (pdo run, and the pdo export worker)
+## HTTP surface (perch run, and the perch export worker)
 
 - GET/HEAD requests that match a file under \`public/\` are served as-is, before
   fetch() and without waking the object, with Cloudflare Static Assets'
@@ -57,11 +57,11 @@ ${RUNTIME.map((r) => `- ${r.api}: ${r.note}`).join('\n')}
 - Templates import as strings: \`import page from "./page.html"\` (also .txt,
   .sql, .css, .md, .svg). Binary files go through propose_change as
   \`{ "base64": "..." }\`; 25 MiB per file.
-- \`POST /.pdo/rpc/<method>\` with a JSON array body calls a public method and
+- \`POST /.perch/rpc/<method>\` with a JSON array body calls a public method and
   returns \`{"result": ...}\`. constructor, fetch, alarm, ctx, env and
   names starting with \`_\` are not RPC.
 
-## MCP (\`pdo mcp <file>\`, stdio, JSON-RPC 2.0, one message per line)
+## MCP (\`perch mcp <file>\`, stdio, JSON-RPC 2.0, one message per line)
 
 Workflow: describe_object, read_code, propose_change (code + tests +
 migrations on the preview; stored tests run), read_object and test_call
@@ -90,7 +90,7 @@ Edits: propose_change takes \`edits: [{ path, old, new, replace_all? }]\`.
 version, not whole files.
 
 Stored tests: files under \`test/\` that
-\`import { test, expect } from "pdo:test"\`. Each \`test(name, async (obj) => …)\`
+\`import { test, expect } from "perch:test"\`. Each \`test(name, async (obj) => …)\`
 runs on its own fresh, empty copy of the object. \`obj\` has
 \`fetch(path, init)\` (an object body is a JSON POST), \`rpc(method, ...args)\`,
 \`alarm()\`, \`sql(query, ...bindings)\`, \`storage\`, and
@@ -98,15 +98,15 @@ runs on its own fresh, empty copy of the object. \`obj\` has
 toBeTruthy, toBeFalsy, toBeNull, toBeDefined, toContain, toHaveLength,
 toBeGreaterThan, toBeLessThan, toMatch and .not.
 
-Example client config: \`claude mcp add todo -- pdo mcp todo.obj\`
+Example client config: \`claude mcp add todo -- perch mcp todo.perch\`
 
 ## CLI
 
 ${COMMANDS.map((c) => `- \`${c.usage}\`: ${c.does}`).join('\n')}
 
-\`pdo export\` writes \`src/**\` byte for byte, \`pdo/worker.js\` (a wrapper
-that applies migrations once per object, tracked in \`_pdo_migrations\`, and
-serves the RPC route), \`pdo/migrations.js\` and \`wrangler.jsonc\` with one
+\`perch export\` writes \`src/**\` byte for byte, \`perch/worker.js\` (a wrapper
+that applies migrations once per object, tracked in \`_perch_migrations\`, and
+serves the RPC route), \`perch/migrations.js\` and \`wrangler.jsonc\` with one
 SQLite-backed Durable Object binding. Deploy with \`bunx wrangler deploy\`.
 
 ## Out of scope in v0
@@ -116,7 +116,7 @@ ${NOT_YET.map((n) => `- ${n}`).join('\n')}
 ## Pages
 
 - ${base}/ : overview and quick start
-- ${base}/run : open a .obj and run it in the browser (SQLite as WebAssembly, the same bootstrap as the native runtime; nothing is uploaded)
+- ${base}/run : open a .perch and run it in the browser (SQLite as WebAssembly, the same bootstrap as the native runtime; nothing is uploaded)
 - ${base}/format : the _obj_ tables
 `;
 
