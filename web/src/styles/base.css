@@ -8,17 +8,23 @@
  * System fonts only: nothing is fetched from anywhere but this origin.
  */
 
+/* Inked in pen, then coloured with a darker watercolour: paper, one ink, and
+ * four pigments. --amber and --green keep their roles (the runtime's half and
+ * yours) but are now madder and a deep viridian. */
 :root {
-  --page: #f3f1ec;
-  --page-2: #e9e6df;
-  --card: #fbfaf7;
-  --ink: #17191c;
-  --ink-2: #5a5f66;
-  --line: #d3cfc6;
-  --amber: #a35a12;
-  --amber-soft: #a35a1214;
-  --green: #1d6b4f;
-  --green-soft: #1d6b4f17;
+  --page: #f3efe4;
+  --page-2: #e8e2d3;
+  --card: #faf6ec;
+  --ink: #1b1c20;
+  --ink-2: #5c5a55;
+  --line: #d5cdbb;
+  --amber: #8a2a25;
+  --amber-soft: #8a2a251a;
+  --green: #17564f;
+  --green-soft: #17564f20;
+  --indigo: #1a2650;
+  --umber: #4a2c1a;
+  --wash-blend: multiply;
 
   --mono: ui-monospace, 'SF Mono', SFMono-Regular, 'JetBrains Mono', Menlo, Consolas, monospace;
   --sans: system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
@@ -30,16 +36,19 @@
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --page: #121315;
-    --page-2: #1a1c1f;
-    --card: #17191b;
-    --ink: #e8e6e1;
-    --ink-2: #9a9ea4;
-    --line: #2d3034;
-    --amber: #e09a4f;
-    --amber-soft: #e09a4f1a;
-    --green: #5fc39a;
-    --green-soft: #5fc39a1a;
+    --page: #15161a;
+    --page-2: #1d1f24;
+    --card: #1a1c20;
+    --ink: #ece7db;
+    --ink-2: #a39f94;
+    --line: #34373d;
+    --amber: #e08b7f;
+    --amber-soft: #e08b7f1f;
+    --green: #74c2b5;
+    --green-soft: #74c2b51f;
+    --indigo: #3d53a8;
+    --umber: #8d5c3b;
+    --wash-blend: normal;
     color-scheme: dark;
   }
 }
@@ -105,14 +114,66 @@ p { margin: 0; }
   align-items: center;
   gap: 0.6rem;
 }
+/* A dab of colour before each label, as if testing the brush. */
 .eyebrow::before {
   content: '';
-  width: 1.4rem;
-  height: 2px;
-  background: currentColor;
+  width: 1.7rem;
+  height: 0.7rem;
+  border-radius: 40% 60% 55% 45%;
+  background: var(--amber);
+  filter: url(#perch-wash-s);
+  mix-blend-mode: var(--wash-blend);
 }
 
-section { padding: clamp(3rem, 7vw, 5.5rem) 0; border-top: 1px solid var(--line); }
+/* Section rules are ruled in pen. */
+section { position: relative; padding: clamp(3rem, 7vw, 5.5rem) 0; }
+section::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: max(var(--gutter), calc(50% - var(--wrap) / 2 + var(--gutter)));
+  right: max(var(--gutter), calc(50% - var(--wrap) / 2 + var(--gutter)));
+  height: 1.5px;
+  background: var(--ink);
+  opacity: 0.5;
+  filter: url(#perch-ink-s);
+}
+
+/* Paper: a faint tooth under everything. */
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  opacity: 0.5;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='220' height='220'%3E%3Cfilter id='p'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' seed='8'/%3E%3CfeColorMatrix values='0 0 0 0 0.35  0 0 0 0 0.3  0 0 0 0 0.2  0 0 0 0.22 -0.06'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23p)'/%3E%3C/svg%3E");
+}
+
+/* Pen outline: the box's border, redrawn with the ink wobble. Put it on any
+ * positioned box; the real border stays for layout and is made invisible. */
+.inked { position: relative; border-color: transparent !important; box-shadow: none !important; }
+.inked::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border: 1.6px solid var(--ink);
+  border-radius: inherit;
+  filter: url(#perch-ink-s);
+  pointer-events: none;
+}
+
+/* A wash laid under an element's content. Colour comes from --wash. */
+.washed { position: relative; isolation: isolate; }
+.washed::before {
+  content: '';
+  position: absolute;
+  inset: 2px 1px;
+  z-index: -1;
+  border-radius: inherit;
+  background: var(--wash, var(--indigo));
+  filter: url(#perch-wash-s);
+}
 .stack > * + * { margin-top: 1rem; }
 .stack-lg > * + * { margin-top: 1.75rem; }
 

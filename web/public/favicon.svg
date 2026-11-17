@@ -1,10 +1,21 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="6 18 136 108">
+  <!-- The perch mark at icon size: the same bird, heavier pen, flat washes. -->
   <style>
-    .f { fill: #fbfaf7; stroke: #17191c; }
-    @media (prefers-color-scheme: dark) { .f { fill: #17191b; stroke: #e8e6e1; } }
+    .i { stroke: #1b1c20; }
+    .d { fill: #1b1c20; }
+    @media (prefers-color-scheme: dark) { .i { stroke: #ece7db; } .d { fill: #ece7db; } }
   </style>
-  <rect class="f" x="5" y="3" width="22" height="26" rx="3" stroke-width="2"/>
-  <rect x="9" y="8" width="14" height="2.5" fill="#a35a12"/>
-  <rect x="9" y="12.5" width="14" height="2.5" fill="#a35a12"/>
-  <rect x="9" y="19" width="14" height="5" fill="#1d6b4f"/>
+  <path fill="#1f6b62" opacity="0.8" d="M20 46c16-24 64-32 96-14 20 11 28 34 16 52-14 22-58 28-88 16-26-10-38-34-24-54z"/>
+  <path fill="#26397a" d="M42 72c-2-22 16-42 40-42 22 0 36 16 34 36-2 22-22 36-44 34-18-2-28-12-30-28z"/>
+  <path fill="#a8332d" d="M86 60c8-8 22-6 26 4 4 12-6 24-18 24-12 0-18-16-8-28z"/>
+  <path fill="none" stroke="#6b4228" stroke-width="10" stroke-linecap="round" d="M12 113c40-9 84-4 136-18"/>
+  <g class="i" fill="none" stroke-width="5.5" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M8 113c42-9 88-4 142-19"/>
+    <path d="M118 44c-3-11-17-15-25-7-17 2-36 15-41 34"/>
+    <path d="M52 71L20 92"/>
+    <path d="M54 80c8 14 32 17 47 6 14-10 19-27 17-42"/>
+    <path d="M118 44l14 4-14 5"/>
+    <path d="M62 68c12-13 34-8 37 9-12 8-30 4-37-9z"/>
+    <circle class="d" cx="107" cy="43" r="3.4" stroke="none"/>
+  </g>
 </svg>

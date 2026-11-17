@@ -1,5 +1,6 @@
 ---
 import '../styles/base.css';
+import Brand from '../components/Brand.astro';
 
 interface Props {
   title: string;
@@ -7,7 +8,6 @@ interface Props {
 }
 const { title, description } = Astro.props;
 const nav = [
-  { href: '/', label: 'perch' },
   { href: '/run', label: 'run' },
   { href: '/format', label: 'the format' },
   { href: '/llms.txt', label: 'llms.txt' },
@@ -27,13 +27,14 @@ const here = Astro.url.pathname.replace(/\.html$/, '').replace(/\/$/, '') || '/'
     <link rel="canonical" href={new URL(here, Astro.site)} />
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
     <link rel="alternate" type="text/plain" href="/llms.txt" title="llms.txt" />
-    <meta name="theme-color" content="#f3f1ec" media="(prefers-color-scheme: light)" />
-    <meta name="theme-color" content="#121315" media="(prefers-color-scheme: dark)" />
+    <meta name="theme-color" content="#f3efe4" media="(prefers-color-scheme: light)" />
+    <meta name="theme-color" content="#15161a" media="(prefers-color-scheme: dark)" />
   </head>
   <body>
     <a href="#main" class="skip">Skip to content</a>
     <header>
       <nav class="wrap" aria-label="Site">
+        <a class="brand" href="/" aria-label="perch, home"><Brand class="lockup" /></a>
         <ul>
           {nav.map(({ href, label }) => (
             <li>
@@ -44,6 +45,27 @@ const here = Astro.url.pathname.replace(/\.html$/, '').replace(/\/$/, '') || '/'
         <span class="ver mono">v0.1.0</span>
       </nav>
     </header>
+    <!-- Gentler versions of the brand filters, for small page elements. -->
+    <svg class="filters" aria-hidden="true" width="0" height="0" focusable="false">
+      <defs>
+        <filter id="perch-wash-s" x="-10%" y="-40%" width="120%" height="180%" color-interpolation-filters="sRGB">
+          <feTurbulence type="fractalNoise" baseFrequency="0.03" numOctaves="3" seed="4" result="n"/>
+          <feDisplacementMap in="SourceGraphic" in2="n" scale="9" xChannelSelector="R" yChannelSelector="B" result="d"/>
+          <feGaussianBlur in="d" stdDeviation="0.4" result="b"/>
+          <feMorphology in="b" operator="erode" radius="1.2" result="inner"/>
+          <feGaussianBlur in="inner" stdDeviation="1.2" result="innerSoft"/>
+          <feComposite in="b" in2="innerSoft" operator="out" result="rim"/>
+          <feTurbulence type="fractalNoise" baseFrequency="0.04" numOctaves="2" seed="21" result="p"/>
+          <feColorMatrix in="p" type="matrix" values="0 0 0 0 0  0 0 0 0 0  0 0 0 0 0  0 0 0 -0.7 1.25" result="pool"/>
+          <feComposite in="b" in2="pool" operator="in" result="body"/>
+          <feMerge><feMergeNode in="body"/><feMergeNode in="rim"/></feMerge>
+        </filter>
+        <filter id="perch-ink-s" x="-3%" y="-3%" width="106%" height="106%">
+          <feTurbulence type="fractalNoise" baseFrequency="0.02" numOctaves="2" seed="3" result="n"/>
+          <feDisplacementMap in="SourceGraphic" in2="n" scale="3" xChannelSelector="R" yChannelSelector="G"/>
+        </filter>
+      </defs>
+    </svg>
     <main id="main">
       <slot />
     </main>
@@ -75,8 +97,7 @@ const here = Astro.url.pathname.replace(/\.html$/, '').replace(/\/$/, '') || '/'
       header nav {
         display: flex;
         align-items: center;
-        justify-content: space-between;
-        gap: 1rem;
+        gap: 1.5rem;
       }
       header ul {
         display: flex;
@@ -95,8 +116,10 @@ const here = Astro.url.pathname.replace(/\.html$/, '').replace(/\/$/, '') || '/'
         border-bottom: 2px solid transparent;
       }
       header a:hover { color: var(--ink); }
-      header li:first-child a { color: var(--ink); font-weight: 700; }
-      header a[aria-current='page'] { color: var(--ink); border-bottom-color: var(--green); }
+      header .brand { border: 0; padding: 0.35rem 0; margin-right: auto; display: block; }
+      header .brand :global(.lockup) { display: block; height: 3.1rem; width: 9.3rem; overflow: visible; }
+      .filters { position: absolute; }
+      header a[aria-current='page'] { color: var(--ink); border-bottom-color: var(--amber); }
       .ver { font-size: 0.75rem; color: var(--ink-2); }
 
       footer {

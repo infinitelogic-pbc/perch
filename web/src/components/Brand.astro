@@ -1,0 +1,16 @@
+---
+// The perch lockup, inline so the page can theme it and reuse its filters.
+// The art lives in one place: public/perch.svg.
+import art from '../../public/perch.svg?raw';
+
+interface Props {
+  /** Include the <style> and <defs> (filters). Exactly one Brand per page should. */
+  defs?: boolean;
+  class?: string;
+}
+const { defs = true, class: className } = Astro.props;
+let svg = art;
+if (!defs) svg = svg.replace(/<style>[\s\S]*?<\/style>/, '').replace(/<defs>[\s\S]*?<\/defs>/, '');
+svg = svg.replace('<svg ', `<svg class="${className ?? ''}" `);
+---
+<Fragment set:html={svg} />

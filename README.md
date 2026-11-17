@@ -1,3 +1,5 @@
+<img src="web/public/perch.svg" alt="perch" width="360">
+
 # perch: portable durable objects
 
 A portable durable object is one SQLite file holding both a Durable Object's

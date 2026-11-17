@@ -13,8 +13,8 @@ import Base from '../layouts/Base.astro';
       <div id="drop" class="drop">
         <p><strong>Drop a .perch file here</strong>, or</p>
         <div class="row">
-          <button id="pick" class="btn primary" type="button">Open a file</button>
-          <button id="example" class="btn" type="button">Try the to-do example</button>
+          <button id="pick" class="btn primary inked washed" type="button">Open a file</button>
+          <button id="example" class="btn inked" type="button">Try the to-do example</button>
         </div>
         <input id="file" type="file" accept=".perch,.preview,application/octet-stream" hidden />
         <p id="start-status" class="small" role="status" aria-live="polite"></p>
@@ -39,9 +39,9 @@ import Base from '../layouts/Base.astro';
         </div>
         <div class="acts">
           <span id="save-status" class="small" role="status" aria-live="polite"></span>
-          <button id="save" class="btn primary" type="button">Save</button>
-          <button id="download" class="btn" type="button">Download</button>
-          <button id="close" class="btn" type="button">Close</button>
+          <button id="save" class="btn primary inked washed" type="button">Save</button>
+          <button id="download" class="btn inked" type="button">Download</button>
+          <button id="close" class="btn inked" type="button">Close</button>
         </div>
       </div>
       <p id="load-error" class="error mono" hidden></p>
@@ -284,6 +284,7 @@ import Base from '../layouts/Base.astro';
   .run {
   padding-block: clamp(1.5rem, 4vw, 3rem);
   section { border: 0; padding: 0; margin: 0; }
+  section::before { display: none; }
   [hidden] { display: none !important; }
   .start { max-width: 46rem; }
   h1 { font-size: clamp(1.7rem, 1.2rem + 2.2vw, 2.6rem); letter-spacing: -0.02em; line-height: 1.1; }
@@ -293,7 +294,8 @@ import Base from '../layouts/Base.astro';
   .row { display: flex; flex-wrap: wrap; gap: 0.5rem; }
   .btn { font: inherit; padding: 0.45rem 0.9rem; border: 1px solid var(--line); border-radius: 8px; background: var(--card); color: var(--ink); cursor: pointer; }
   .btn:hover { border-color: var(--ink-2); }
-  .btn.primary { background: var(--ink); color: var(--page); border-color: var(--ink); }
+  .btn.primary { background: transparent; color: #f3efe4; --wash: var(--indigo); }
+  .btn.primary:hover { --wash: var(--green); }
   .notes { color: var(--ink-2); padding-left: 1.1rem; display: grid; gap: 0.35rem; }
   .small { font-size: 0.875rem; color: var(--ink-2); }
 
