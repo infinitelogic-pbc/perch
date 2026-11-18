@@ -14,52 +14,52 @@ export interface Table {
 /** The reserved tables, in the order store.rs creates them. */
 export const RESERVED: Table[] = [
   {
-    name: '_obj_meta',
+    name: '_perch_meta',
     columns: 'key, value',
     holds: 'name, class, live check-in',
     detail:
-      'format_version (1), api_version (perch-v0), name, class, main (src/index.ts), created_at and live_checkin, the id of the code that runs.',
+      'format_version (2), api_version (perch-v0), name, class, main (src/index.ts), created_at and live_checkin, the id of the code that runs.',
   },
   {
-    name: '_obj_blobs',
+    name: '_perch_blobs',
     columns: 'hash, size, data',
     holds: 'code, content-addressed',
     detail:
       'Every source file version, keyed by its SHA-256. A file that does not change between check-ins is stored once.',
   },
   {
-    name: '_obj_checkins',
+    name: '_perch_checkins',
     columns: 'id, parent, manifest, message, created_at, schema',
     holds: 'code history',
     detail:
       'Fossil-style check-ins: a manifest maps each path to a blob hash, parent links the history, and the id is the SHA-256 of the check-in. schema snapshots the data tables the code was released against, which is what rollback checks.',
   },
   {
-    name: '_obj_migrations',
+    name: '_perch_migrations',
     columns: 'seq, name, sql, checkin, applied_at',
     holds: 'forward-only schema',
     detail:
       'Ordered SQL migrations, each tied to the check-in that brought it. They only move forward; nothing undoes one.',
   },
   {
-    name: '_obj_kv',
+    name: '_perch_kv',
     columns: 'key, value',
     holds: 'ctx.storage.get / put',
     detail:
       'The key-value half of storage. Values are UTF-8 JSON that any runtime can read; Date, Map, Set, bytes, bigint and the rest are tagged with $perch, so what structuredClone accepts round-trips (cycles are refused).',
   },
   {
-    name: '_obj_alarms',
+    name: '_perch_alarms',
     columns: 'id = 1, scheduled_at, retry_count',
     holds: 'the next alarm',
     detail: 'At most one row: when alarm() is due next. ctx.storage.setAlarm writes it.',
   },
   {
-    name: '_obj_changes',
+    name: '_perch_changes',
     columns: 'id, at, event, checkin, changeset',
     holds: 'a changeset per write',
     detail:
-      'Every event that writes runs under a SQLite session; its changeset (data tables and _obj_kv) is stored here in the same transaction, with the check-in that produced it.',
+      'Every event that writes runs under a SQLite session; its changeset (data tables and _perch_kv) is stored here in the same transaction, with the check-in that produced it.',
   },
 ];
 
@@ -117,8 +117,8 @@ export const RUNTIME: { api: string; note: string }[] = [
 
 /** Statements object code tried in the end-to-end test, all refused. */
 export const REFUSED = [
-  'SELECT * FROM _obj_meta',
-  "UPDATE _obj_checkins SET message = 'x'",
+  'SELECT * FROM _perch_meta',
+  "UPDATE _perch_checkins SET message = 'x'",
   'DROP TABLE todos',
   'CREATE TABLE sneaky (id TEXT PRIMARY KEY)',
   'BEGIN',

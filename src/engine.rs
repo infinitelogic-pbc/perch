@@ -65,7 +65,7 @@ fn err(e: impl std::fmt::Display) -> JsErrorBox {
 }
 
 /// Run `f` against the connection with the authorizer temporarily privileged
-/// (for runtime-owned tables like `_obj_kv`), then restore sandbox mode.
+/// (for runtime-owned tables like `_perch_kv`), then restore sandbox mode.
 fn privileged<T>(
     state: &mut OpState,
     f: impl FnOnce(&Connection) -> rusqlite::Result<T>,
@@ -225,7 +225,7 @@ fn op_txn(state: &mut OpState, #[string] action: String) -> Result<(), JsErrorBo
 fn op_kv_get(state: &mut OpState, #[string] key: String) -> Result<Option<ToJsBuffer>, JsErrorBox> {
     use rusqlite::OptionalExtension;
     let v: Option<Vec<u8>> = privileged(state, |c| {
-        c.query_row("SELECT value FROM _obj_kv WHERE key=?", [&key], |r| r.get(0))
+        c.query_row("SELECT value FROM _perch_kv WHERE key=?", [&key], |r| r.get(0))
             .optional()
     })?;
     Ok(v.map(ToJsBuffer::from))
@@ -237,7 +237,7 @@ fn op_kv_put(state: &mut OpState, #[string] key: String, #[buffer] value: JsBuff
     let bytes: &[u8] = &value;
     privileged(state, |c| {
         c.execute(
-            "INSERT INTO _obj_kv(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            "INSERT INTO _perch_kv(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
             rusqlite::params![key, bytes],
         )
     })?;
@@ -247,7 +247,7 @@ fn op_kv_put(state: &mut OpState, #[string] key: String, #[buffer] value: JsBuff
 #[op2(fast)]
 fn op_kv_delete(state: &mut OpState, #[string] key: String) -> Result<bool, JsErrorBox> {
     refuse_if_read_only(state)?;
-    privileged(state, |c| c.execute("DELETE FROM _obj_kv WHERE key=?", [&key])).map(|n| n > 0)
+    privileged(state, |c| c.execute("DELETE FROM _perch_kv WHERE key=?", [&key])).map(|n| n > 0)
 }
 
 #[derive(Deserialize, Default)]
@@ -264,7 +264,7 @@ struct ListOpts {
 #[op2]
 #[serde]
 fn op_kv_list(state: &mut OpState, #[serde] o: ListOpts) -> Result<Vec<(String, ToJsBuffer)>, JsErrorBox> {
-    let mut sql = String::from("SELECT key, value FROM _obj_kv WHERE 1=1");
+    let mut sql = String::from("SELECT key, value FROM _perch_kv WHERE 1=1");
     let mut args: Vec<String> = vec![];
     if let Some(s) = o.start {
         sql.push_str(" AND key >= ?");
@@ -300,7 +300,7 @@ fn op_kv_list(state: &mut OpState, #[serde] o: ListOpts) -> Result<Vec<(String, 
 #[op2(fast)]
 fn op_kv_delete_all(state: &mut OpState) -> Result<(), JsErrorBox> {
     refuse_if_read_only(state)?;
-    privileged(state, |c| c.execute_batch("DELETE FROM _obj_kv; DELETE FROM _obj_alarms;"))
+    privileged(state, |c| c.execute_batch("DELETE FROM _perch_kv; DELETE FROM _perch_alarms;"))
 }
 
 // ---------------------------------------------------------------- alarms
@@ -309,7 +309,7 @@ fn op_kv_delete_all(state: &mut OpState) -> Result<(), JsErrorBox> {
 fn op_alarm_get(state: &mut OpState) -> Result<f64, JsErrorBox> {
     use rusqlite::OptionalExtension;
     let v: Option<i64> = privileged(state, |c| {
-        c.query_row("SELECT scheduled_at FROM _obj_alarms WHERE id=1", [], |r| r.get(0))
+        c.query_row("SELECT scheduled_at FROM _perch_alarms WHERE id=1", [], |r| r.get(0))
             .optional()
     })?;
     Ok(v.map(|x| x as f64).unwrap_or(-1.0))
@@ -322,7 +322,7 @@ fn op_alarm_set(state: &mut OpState, at: f64) -> Result<(), JsErrorBox> {
     let at = at as i64;
     privileged(state, |c| {
         c.execute(
-            "INSERT INTO _obj_alarms(id, scheduled_at, retry_count) VALUES (1, ?, 0)
+            "INSERT INTO _perch_alarms(id, scheduled_at, retry_count) VALUES (1, ?, 0)
              ON CONFLICT(id) DO UPDATE SET scheduled_at=excluded.scheduled_at, retry_count=0",
             [at],
         )
@@ -334,7 +334,7 @@ fn op_alarm_set(state: &mut OpState, at: f64) -> Result<(), JsErrorBox> {
 fn op_alarm_delete(state: &mut OpState) -> Result<(), JsErrorBox> {
     refuse_if_read_only(state)?;
     st(state).alarm_touched = true;
-    privileged(state, |c| c.execute("DELETE FROM _obj_alarms", []))?;
+    privileged(state, |c| c.execute("DELETE FROM _perch_alarms", []))?;
     Ok(())
 }
 

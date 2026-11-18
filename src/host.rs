@@ -1,6 +1,6 @@
 //! The object host: owns one object file and one engine, and runs events one
 //! at a time. Every event is one SQLite transaction with a session attached;
-//! its changeset is recorded in `_obj_changes` before commit.
+//! its changeset is recorded in `_perch_changes` before commit.
 
 use std::collections::BTreeMap;
 use std::io::Read;
@@ -189,7 +189,7 @@ impl Host {
         conn.execute_batch(if read_only { "BEGIN" } else { "BEGIN IMMEDIATE" })?;
         let result = async {
             let mut session = Session::new(&conn)?;
-            session.table_filter(Some(|t: &str| !t.starts_with("_obj_") || t == "_obj_kv"));
+            session.table_filter(Some(|t: &str| !t.starts_with("_perch_") || t == "_perch_kv"));
             session.attach::<&str>(None)?;
             mode.set(if read_only { Mode::ReadOnly } else { Mode::Sandbox });
             let r = engine.dispatch(ev, body).await;
@@ -201,7 +201,7 @@ impl Host {
             let r = r?;
             if !cs.is_empty() {
                 conn.execute(
-                    "INSERT INTO _obj_changes(at, event, checkin, changeset) VALUES (?, ?, ?, ?)",
+                    "INSERT INTO _perch_changes(at, event, checkin, changeset) VALUES (?, ?, ?, ?)",
                     rusqlite::params![now_ms(), label, checkin, cs],
                 )?;
             }
@@ -409,10 +409,10 @@ impl Host {
             if !out.alarm_touched && at2 == at {
                 self.store.with_mode(Mode::Privileged, |c| {
                     if out.ok || out.alarm_missing || retry >= 6 {
-                        c.execute("DELETE FROM _obj_alarms WHERE id=1 AND scheduled_at=?", [at])
+                        c.execute("DELETE FROM _perch_alarms WHERE id=1 AND scheduled_at=?", [at])
                     } else {
                         c.execute(
-                            "UPDATE _obj_alarms SET scheduled_at=?, retry_count=? WHERE id=1",
+                            "UPDATE _perch_alarms SET scheduled_at=?, retry_count=? WHERE id=1",
                             [now_ms() + 1000 * (1i64 << retry), retry + 1],
                         )
                     }

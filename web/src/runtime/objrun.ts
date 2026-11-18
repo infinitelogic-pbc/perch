@@ -67,7 +67,7 @@ export class ObjRuntime {
     rt.name = rt.meta("name") ?? "object";
     rt.className = rt.meta("class") ?? "";
     rt.checkin = rt.meta("live_checkin") ?? "";
-    const m = rt.db.selectValue("SELECT manifest FROM _obj_checkins WHERE id = ?", [rt.checkin]);
+    const m = rt.db.selectValue("SELECT manifest FROM _perch_checkins WHERE id = ?", [rt.checkin]);
     if (!m) throw new Error("this file has no live check-in");
     rt.manifest = JSON.parse(m);
     try {
@@ -101,8 +101,19 @@ export class ObjRuntime {
     );
     this.db.checkRc(rc);
     this.db.exec("PRAGMA foreign_keys = ON");
+    // Format 1 named its reserved tables _obj_*. Rename them, as the native
+    // binary does on open; the file is saved in format 2.
+    const has = (t: string) => !!this.db.selectValue("SELECT count(*) FROM sqlite_master WHERE type='table' AND name=?", [t]);
+    if (has("_obj_meta") && !has("_perch_meta")) {
+      this.db.exec("BEGIN");
+      for (const t of ["meta", "blobs", "checkins", "migrations", "kv", "alarms", "changes"]) {
+        if (has(`_obj_${t}`)) this.db.exec(`ALTER TABLE _obj_${t} RENAME TO _perch_${t}`);
+      }
+      this.db.exec("UPDATE _perch_meta SET value='2' WHERE key='format_version'; COMMIT;");
+      this.dirty = true;
+    }
     const v = this.meta("format_version");
-    if (v !== "1") throw new Error(v ? `unsupported object file format version ${v}` : "this SQLite file is not a portable object (no _obj_meta)");
+    if (v !== "2") throw new Error(v ? `unsupported object file format version ${v}` : "this SQLite file is not a portable object (no _perch_meta)");
     const str = (x: any) => (typeof x === "number" ? (x ? wasm.cstrToJs(x) : null) : x ?? null);
     capi.sqlite3_set_authorizer(this.db.pointer, (_p: any, action: number, a1: any, a2: any, dbName: any) => {
       try {
@@ -118,7 +129,7 @@ export class ObjRuntime {
     if (this.mode === Mode.Privileged) return true;
     const c = this.capi;
     if (dbName === "temp") return false;
-    const reserved = (t: string | null) => !!t && t.startsWith("_obj_");
+    const reserved = (t: string | null) => !!t && t.startsWith("_perch_");
     const internal = (t: string | null) => !!t && t.startsWith("sqlite_");
     switch (action) {
       case c.SQLITE_SELECT: case c.SQLITE_RECURSIVE: case c.SQLITE_FUNCTION:
@@ -147,13 +158,13 @@ export class ObjRuntime {
 
   private meta(key: string): string | null {
     return this.priv(() => {
-      const has = this.db.selectValue("SELECT count(*) FROM sqlite_master WHERE type='table' AND name='_obj_meta'");
-      return has ? (this.db.selectValue("SELECT value FROM _obj_meta WHERE key = ?", [key]) ?? null) : null;
+      const has = this.db.selectValue("SELECT count(*) FROM sqlite_master WHERE type='table' AND name='_perch_meta'");
+      return has ? (this.db.selectValue("SELECT value FROM _perch_meta WHERE key = ?", [key]) ?? null) : null;
     });
   }
 
   private blob(hash: string): Uint8Array {
-    const b = this.priv(() => this.db.selectValue("SELECT data FROM _obj_blobs WHERE hash = ?", [hash]));
+    const b = this.priv(() => this.db.selectValue("SELECT data FROM _perch_blobs WHERE hash = ?", [hash]));
     if (!(b instanceof Uint8Array)) throw new Error(`missing blob ${hash}`);
     return b;
   }
@@ -182,13 +193,13 @@ export class ObjRuntime {
           else { const n = rt.savepoint--; rt.db.exec(`ROLLBACK TO perch_tx_${n}; RELEASE perch_tx_${n}`); }
         });
       },
-      op_kv_get: (key: string) => rt.priv(() => rt.db.selectValue("SELECT value FROM _obj_kv WHERE key = ?", [key]) ?? null),
+      op_kv_get: (key: string) => rt.priv(() => rt.db.selectValue("SELECT value FROM _perch_kv WHERE key = ?", [key]) ?? null),
       op_kv_put(key: string, value: Uint8Array) {
-        rt.priv(() => rt.db.exec({ sql: "INSERT INTO _obj_kv(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", bind: [key, value] }));
+        rt.priv(() => rt.db.exec({ sql: "INSERT INTO _perch_kv(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", bind: [key, value] }));
       },
-      op_kv_delete: (key: string) => rt.priv(() => { rt.db.exec({ sql: "DELETE FROM _obj_kv WHERE key = ?", bind: [key] }); return rt.db.changes() > 0; }),
+      op_kv_delete: (key: string) => rt.priv(() => { rt.db.exec({ sql: "DELETE FROM _perch_kv WHERE key = ?", bind: [key] }); return rt.db.changes() > 0; }),
       op_kv_list(o: any = {}) {
-        let sql = "SELECT key, value FROM _obj_kv WHERE 1=1";
+        let sql = "SELECT key, value FROM _perch_kv WHERE 1=1";
         const args: any[] = [];
         if (o.start != null) { sql += " AND key >= ?"; args.push(o.start); }
         if (o.startAfter != null) { sql += " AND key > ?"; args.push(o.startAfter); }
@@ -198,15 +209,15 @@ export class ObjRuntime {
         if (o.limit != null) sql += ` LIMIT ${Math.max(0, Number(o.limit) | 0)}`;
         return rt.priv(() => rt.db.selectArrays(sql, args));
       },
-      op_kv_delete_all() { rt.priv(() => rt.db.exec("DELETE FROM _obj_kv; DELETE FROM _obj_alarms;")); },
-      op_alarm_get: () => rt.priv(() => Number(rt.db.selectValue("SELECT scheduled_at FROM _obj_alarms WHERE id = 1") ?? -1)),
+      op_kv_delete_all() { rt.priv(() => rt.db.exec("DELETE FROM _perch_kv; DELETE FROM _perch_alarms;")); },
+      op_alarm_get: () => rt.priv(() => Number(rt.db.selectValue("SELECT scheduled_at FROM _perch_alarms WHERE id = 1") ?? -1)),
       op_alarm_set(at: number) {
         rt.alarmTouched = true;
-        rt.priv(() => rt.db.exec({ sql: "INSERT INTO _obj_alarms(id, scheduled_at, retry_count) VALUES (1, ?, 0) ON CONFLICT(id) DO UPDATE SET scheduled_at = excluded.scheduled_at, retry_count = 0", bind: [Math.trunc(at)] }));
+        rt.priv(() => rt.db.exec({ sql: "INSERT INTO _perch_alarms(id, scheduled_at, retry_count) VALUES (1, ?, 0) ON CONFLICT(id) DO UPDATE SET scheduled_at = excluded.scheduled_at, retry_count = 0", bind: [Math.trunc(at)] }));
       },
       op_alarm_delete() {
         rt.alarmTouched = true;
-        rt.priv(() => rt.db.exec("DELETE FROM _obj_alarms"));
+        rt.priv(() => rt.db.exec("DELETE FROM _perch_alarms"));
       },
       op_log(level: string, message: string) { rt.onLog({ level, message }); },
       op_take_body(id: number) { const b = rt.bodies.get(id) ?? null; rt.bodies.delete(id); return b; },
@@ -271,7 +282,7 @@ export class ObjRuntime {
     }
     capi.sqlite3session_table_filter(session, (_c: any, t: any) => {
       const name = typeof t === "number" ? wasm.cstrToJs(t) : String(t);
-      return !name.startsWith("_obj_") || name === "_obj_kv" ? 1 : 0;
+      return !name.startsWith("_perch_") || name === "_perch_kv" ? 1 : 0;
     }, 0);
     capi.sqlite3session_attach(session, null);
 
@@ -312,7 +323,7 @@ export class ObjRuntime {
         capi.sqlite3session_delete(session);
       }
       if (cs.length) {
-        db.exec({ sql: "INSERT INTO _obj_changes(at, event, checkin, changeset) VALUES (?, ?, ?, ?)", bind: [Date.now(), label, this.checkin, cs] });
+        db.exec({ sql: "INSERT INTO _perch_changes(at, event, checkin, changeset) VALUES (?, ?, ?, ?)", bind: [Date.now(), label, this.checkin, cs] });
       }
       // Writes made before a handler throws are kept, as on Cloudflare.
       db.exec("COMMIT");
@@ -389,17 +400,17 @@ export class ObjRuntime {
   /** Fire the alarm if it is due. Call this on a timer; alarms need the page open. */
   async tickAlarm(): Promise<boolean> {
     if (this.loadError) return false;
-    const row = this.priv(() => this.db.selectArray("SELECT scheduled_at, retry_count FROM _obj_alarms WHERE id = 1"));
+    const row = this.priv(() => this.db.selectArray("SELECT scheduled_at, retry_count FROM _perch_alarms WHERE id = 1"));
     if (!row || Number(row[0]) > Date.now()) return false;
     const [at, retry] = [Number(row[0]), Number(row[1])];
     const out = await this.event("alarm", { kind: "alarm", retryCount: retry });
     const touched = this.alarmTouched;
     const missing = out.ok && out.meta.missing === true;
     this.priv(() => {
-      const now = this.db.selectValue("SELECT scheduled_at FROM _obj_alarms WHERE id = 1");
+      const now = this.db.selectValue("SELECT scheduled_at FROM _perch_alarms WHERE id = 1");
       if (now == null || Number(now) !== at || touched) return; // the handler rescheduled or deleted it
-      if (out.ok || missing || retry >= 6) this.db.exec({ sql: "DELETE FROM _obj_alarms WHERE id = 1 AND scheduled_at = ?", bind: [at] });
-      else this.db.exec({ sql: "UPDATE _obj_alarms SET scheduled_at = ?, retry_count = ? WHERE id = 1", bind: [Date.now() + 1000 * 2 ** retry, retry + 1] });
+      if (out.ok || missing || retry >= 6) this.db.exec({ sql: "DELETE FROM _perch_alarms WHERE id = 1 AND scheduled_at = ?", bind: [at] });
+      else this.db.exec({ sql: "UPDATE _perch_alarms SET scheduled_at = ?, retry_count = ? WHERE id = 1", bind: [Date.now() + 1000 * 2 ** retry, retry + 1] });
     });
     this.dirty = true;
     if (!out.ok) this.onLog({ level: "error", message: `alarm failed: ${out.error}` });
@@ -418,11 +429,11 @@ export class ObjRuntime {
   info() {
     return this.priv(() => {
       const tables = this.db
-        .selectValues("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE '\\_obj\\_%' ESCAPE '\\' AND name NOT LIKE 'sqlite\\_%' ESCAPE '\\' ORDER BY name")
+        .selectValues("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE '\\_perch\\_%' ESCAPE '\\' AND name NOT LIKE 'sqlite\\_%' ESCAPE '\\' ORDER BY name")
         .map((name: string) => ({ name, rows: Number(this.db.selectValue(`SELECT count(*) FROM "${name.replace(/"/g, '""')}"`)) }));
-      const ck = this.db.selectObject("SELECT message, created_at FROM _obj_checkins WHERE id = ?", [this.checkin]);
+      const ck = this.db.selectObject("SELECT message, created_at FROM _perch_checkins WHERE id = ?", [this.checkin]);
       const paths = Object.keys(this.manifest);
-      const alarm = this.db.selectValue("SELECT scheduled_at FROM _obj_alarms WHERE id = 1");
+      const alarm = this.db.selectValue("SELECT scheduled_at FROM _perch_alarms WHERE id = 1");
       return {
         name: this.name,
         class: this.className,
@@ -431,9 +442,9 @@ export class ObjRuntime {
         tables,
         files: paths.filter((p) => !p.startsWith(PUBLIC_DIR)),
         public: paths.filter((p) => p.startsWith(PUBLIC_DIR)),
-        kvKeys: Number(this.db.selectValue("SELECT count(*) FROM _obj_kv")),
-        changesets: Number(this.db.selectValue("SELECT count(*) FROM _obj_changes")),
-        checkins: Number(this.db.selectValue("SELECT count(*) FROM _obj_checkins")),
+        kvKeys: Number(this.db.selectValue("SELECT count(*) FROM _perch_kv")),
+        changesets: Number(this.db.selectValue("SELECT count(*) FROM _perch_changes")),
+        checkins: Number(this.db.selectValue("SELECT count(*) FROM _perch_checkins")),
         nextAlarm: alarm == null ? null : Number(alarm),
         loadError: this.loadError,
       };

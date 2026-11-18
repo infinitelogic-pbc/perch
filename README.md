@@ -61,19 +61,19 @@ perch export my.perch out/ && (cd out && bunx wrangler deploy)
 
 | Table | Holds |
 | --- | --- |
-| `_obj_meta` | name, class, entry file, format version (1), runtime API version, the live check-in |
-| `_obj_blobs` | content-addressed bytes (SHA-256 → contents): source files |
-| `_obj_checkins` | code history, Fossil style: id (SHA-256), parent, manifest (path → blob), message, time, schema snapshot |
-| `_obj_migrations` | ordered SQL migrations already applied, each tied to the check-in that introduced it |
-| `_obj_kv` | the key-value half of the storage API. Values are UTF-8 JSON that any runtime can read; what plain JSON cannot carry (Date, Map, Set, bytes, bigint, undefined, NaN) is tagged with `$perch`. Values written before this in V8's own format are still read by the native binary |
-| `_obj_alarms` | the next scheduled alarm and its retry count |
-| `_obj_changes` | a session-extension changeset for every event that wrote data (audit log, later undo and sync) |
+| `_perch_meta` | name, class, entry file, format version (2; format 1 files, which named these tables `_obj_*`, are upgraded in place when opened), runtime API version, the live check-in |
+| `_perch_blobs` | content-addressed bytes (SHA-256 → contents): source files |
+| `_perch_checkins` | code history, Fossil style: id (SHA-256), parent, manifest (path → blob), message, time, schema snapshot |
+| `_perch_migrations` | ordered SQL migrations already applied, each tied to the check-in that introduced it |
+| `_perch_kv` | the key-value half of the storage API. Values are UTF-8 JSON that any runtime can read; what plain JSON cannot carry (Date, Map, Set, bytes, bigint, undefined, NaN) is tagged with `$perch`. Values written before this in V8's own format are still read by the native binary |
+| `_perch_alarms` | the next scheduled alarm and its retry count |
+| `_perch_changes` | a session-extension changeset for every event that wrote data (audit log, later undo and sync) |
 | everything else | the object's data, created and changed only by migrations |
 
 A SQLite authorizer enforces the boundary by mode. Object code (`ctx.storage.sql`)
-reads and writes data tables only: no `_obj_` tables, no DDL, no
+reads and writes data tables only: no `_perch_` tables, no DDL, no
 `BEGIN`/`SAVEPOINT`, no `ATTACH`, only introspection pragmas. Migrations may run
-DDL on data tables and never touch `_obj_` tables. `query_data` is read-only.
+DDL on data tables and never touch `_perch_` tables. `query_data` is read-only.
 Only the runtime and the MCP wrapper write reserved tables.
 
 Data tables need a declared primary key (the session extension records nothing
@@ -89,7 +89,7 @@ alone carries the object.
 `perch run` loads the class at the live check-in into one V8 isolate and runs
 events one at a time. Each event (constructor, `fetch`, an RPC call, `alarm`)
 is one SQLite transaction with a session attached; its changeset goes into
-`_obj_changes` before commit. Writes made before a handler throws are kept, as
+`_perch_changes` before commit. Writes made before a handler throws are kept, as
 on Cloudflare. When the live check-in moves (a release or rollback from another
 process), the next event rebuilds the isolate and reruns the constructor.
 
@@ -115,7 +115,7 @@ Each event has a 30 s wall-clock limit.
 
 Files under `public/` are served as-is at the matching URL path, before
 `fetch()`, and without waking the object: a static file is a lookup in
-`_obj_blobs` with no constructor, no transaction and no changeset. A class
+`_perch_blobs` with no constructor, no transaction and no changeset. A class
 that fails to load still serves its static files.
 
 The rules are Cloudflare Workers Static Assets' defaults, so a page behaves
@@ -200,7 +200,7 @@ and `clock.set/advance/now`. `expect` has `toBe`, `toEqual`, `toBeTruthy`,
 `toBeGreaterThan`, `toBeLessThan`, `toMatch` and `.not`. `perch test my.perch`
 runs them from the shell (exit 1 on failure); `examples/todo/test` has seven.
 
-**Data undo.** Every event's changeset is already in `_obj_changes`.
+**Data undo.** Every event's changeset is already in `_perch_changes`.
 `list_changes` shows them; `undo_changes { back_to }` inverts that change and
 every newer one, newest first, in one transaction, restoring rows and KV
 values (alarms are not restored). It aborts untouched if a change no longer
@@ -315,7 +315,7 @@ do locally. Moving state in or out of Cloudflare is not in v0.
   native perch in both directions: native builds a file, the WebAssembly runtime
   serves it (static files, fetch, RPC, alarm, the sandbox), and native opens
   what it saved, reads its KV values, undoes one of its changes and passes the
-  stored tests (34 checks).
+  stored tests, and both runtimes upgrade a format 1 file (38 checks).
 - `cd web && bun test/browser.ts` drives the real `/run` page in headless
   Chrome: the service worker, the app in its iframe, writes, download, and
   reopening from disk (23 checks). `bun test/smoke.ts <file.perch>` opens any

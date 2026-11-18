@@ -106,7 +106,7 @@ const browserAdds = changes.filter((c: any) => c.event === "rpc" && c.tables.tod
 ok(changes.some((c: any) => c.event === "alarm" && c.tables.todos?.deletes === 1) && browserAdds.length >= 1, "changesets recorded in the browser are readable by native perch");
 const before = sh(["call", out, "stats"]).result.total;
 sh(["undo", out, String(changes[0].id)]);
-ok(sh(["call", out, "stats"]).result.total !== before || changes[0].tables._obj_kv, "native perch can undo a change made in the browser runtime");
+ok(sh(["call", out, "stats"]).result.total !== before || changes[0].tables._perch_kv, "native perch can undo a change made in the browser runtime");
 const t = sh(["test", out]);
 ok(t.ok && t.passed === 8, "the saved file passes its stored tests under native perch");
 rt.close();
@@ -127,11 +127,39 @@ const probeFile = join(dir, "probe.perch");
 sh(["new", probeFile, "--class", "Probe", "--from", seed]);
 const p = await ObjRuntime.open(new Uint8Array(readFileSync(probeFile)), { sqlite3, bootstrap, toUrl });
 ok(!p.loadError && (await p.rpc("ok", []) as any).result === "notes:0", "a second object loads, with a nested relative import");
-for (const q of ["SELECT * FROM _obj_meta", "UPDATE _obj_checkins SET message = 'x'", "DELETE FROM _obj_kv", "DROP TABLE notes", "CREATE TABLE sneaky (id TEXT PRIMARY KEY)", "BEGIN", "ATTACH DATABASE ':memory:' AS x", "PRAGMA journal_mode = DELETE"]) {
+for (const q of ["SELECT * FROM _perch_meta", "UPDATE _perch_checkins SET message = 'x'", "DELETE FROM _perch_kv", "DROP TABLE notes", "CREATE TABLE sneaky (id TEXT PRIMARY KEY)", "BEGIN", "ATTACH DATABASE ':memory:' AS x", "PRAGMA journal_mode = DELETE"]) {
   const res = (await p.rpc("run", [q]) as any).result as string;
   ok(res !== "allowed" && /not authorized|prohibited|SQLITE_AUTH/i.test(res), `object code refused in the browser runtime: ${q}`);
 }
 ok((await p.rpc("run", ["INSERT INTO notes VALUES ('a', 'b')"]) as any).result === "allowed", "ordinary writes to data tables are allowed");
+p.close();
+
+// Format 1 files named the reserved tables _obj_*. Both runtimes upgrade them in place.
+const { Database } = await import("bun:sqlite");
+const v1 = join(dir, "v1.perch");
+sh(["new", v1, "--class", "Todo", "--name", "todo", "--from", join(ROOT, "examples/todo")]);
+sh(["call", v1, "add", '["written before the upgrade"]']);
+{
+  const db = new Database(v1);
+  for (const t of ["meta", "blobs", "checkins", "migrations", "kv", "alarms", "changes"]) db.run(`ALTER TABLE _perch_${t} RENAME TO _obj_${t}`);
+  db.run("UPDATE _obj_meta SET value='1' WHERE key='format_version'");
+  db.close();
+}
+const old = new Uint8Array(readFileSync(v1));
+const up = await ObjRuntime.open(old, { sqlite3, bootstrap, toUrl });
+ok(!up.loadError && up.dirty && up.info().tables[0].rows === 1, "the browser runtime opens a format 1 file, upgrades it in memory and marks it unsaved");
+const saved = join(dir, "v1-from-browser.perch");
+writeFileSync(saved, up.export());
+up.close();
+ok(sh(["describe", saved]).format_version === "2" && sh(["call", saved, "stats"]).result.total === 1, "the file it saves is format 2 and opens natively");
+const dn = sh(["describe", v1]);
+ok(dn.format_version === "2" && dn.tables[0].rows === 1 && sh(["test", v1]).passed === 8, "native perch upgrades a format 1 file in place, data and code intact");
+{
+  const db = new Database(v1);
+  const names = (db.query("SELECT name FROM sqlite_master WHERE type='table'").all() as { name: string }[]).filter((r) => r.name.startsWith("_obj_"));
+  db.close();
+  ok(names.length === 0, "no _obj_ tables remain after the upgrade");
+}
 
 console.log(`\n${n} checks passed (${dir})`);
 process.exit(0);

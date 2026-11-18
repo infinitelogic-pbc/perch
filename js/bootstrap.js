@@ -256,7 +256,7 @@
   if (!NATIVE) installGlobals();
 
   // ------------------------------------------------------------ KV value encoding
-  // Values in _obj_kv are UTF-8 JSON, readable by any runtime (native V8, a
+  // Values in _perch_kv are UTF-8 JSON, readable by any runtime (native V8, a
   // browser, Cloudflare tooling). Plain JSON values are stored as they are;
   // everything else structured clone can carry is tagged with "$perch". Shared
   // references are stored once per use, and cycles are refused.

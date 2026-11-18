@@ -4,14 +4,14 @@ import { RESERVED } from '../lib/facts';
 ---
 <Base
   title="The format: perch"
-  description="Inside a portable durable object file: the reserved _obj_ tables that hold code, history, migrations, KV, the alarm and changesets, and the data tables that belong to the object."
+  description="Inside a portable durable object file: the reserved _perch_ tables that hold code, history, migrations, KV, the alarm and changesets, and the data tables that belong to the object."
 >
   <div class="wrap head stack">
     <p class="eyebrow">Format version 1 · api perch-v0</p>
     <h1>Inside a <code>.perch</code> file.</h1>
     <p class="lede">
       An object file is an ordinary SQLite database. Open it with <code>sqlite3</code> and you can
-      read all of it. Seven tables whose names start with <code>_obj_</code> belong to the runtime.
+      read all of it. Seven tables whose names start with <code>_perch_</code> belong to the runtime.
       Every other table belongs to the object.
     </p>
   </div>
@@ -62,7 +62,7 @@ import { RESERVED } from '../lib/facts';
         <h2>Code and history</h2>
         <p>
           A check-in is a manifest from path to blob hash, a parent, a message and a time. Its id is
-          the SHA-256 of those. <code>_obj_meta.live_checkin</code> names the one that runs.
+          the SHA-256 of those. <code>_perch_meta.live_checkin</code> names the one that runs.
         </p>
         <p>
           Releasing writes one squashed check-in, runs its migrations and moves
@@ -72,13 +72,13 @@ import { RESERVED } from '../lib/facts';
         </p>
       </div>
       <pre><span class="c">-- what runs</span>
-SELECT value FROM _obj_meta WHERE key = 'live_checkin';
+SELECT value FROM _perch_meta WHERE key = 'live_checkin';
 
 <span class="c">-- its files</span>
-SELECT manifest FROM _obj_checkins WHERE id = :live;
+SELECT manifest FROM _perch_checkins WHERE id = :live;
 <span class="c">-- {"{"}"src/index.ts":"9f2c…","src/uuid.ts":"41ab…"{"}"}</span>
 
-SELECT data FROM _obj_blobs WHERE hash = '9f2c…';</pre>
+SELECT data FROM _perch_blobs WHERE hash = '9f2c…';</pre>
     </div>
   </section>
 
@@ -98,7 +98,7 @@ SELECT data FROM _obj_blobs WHERE hash = '9f2c…';</pre>
         <h2>Writes leave a trail</h2>
         <p>
           Each event is one SQLite transaction with a session attached. When it writes, its
-          changeset goes into <code>_obj_changes</code> before commit, labelled with the event kind
+          changeset goes into <code>_perch_changes</code> before commit, labelled with the event kind
           (fetch, rpc, alarm) and the check-in that ran.
         </p>
       </div>

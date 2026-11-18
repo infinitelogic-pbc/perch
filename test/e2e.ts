@@ -108,9 +108,9 @@ r = await mcp.tool("propose_change", {
 });
 ok(r.v.build.ok && r.v.stacked_on_previous_preview, "second proposal stacks on the preview");
 for (const q of [
-  "SELECT * FROM _obj_meta",
-  "UPDATE _obj_checkins SET message = 'x'",
-  "DELETE FROM _obj_kv",
+  "SELECT * FROM _perch_meta",
+  "UPDATE _perch_checkins SET message = 'x'",
+  "DELETE FROM _perch_kv",
   "DROP TABLE todos",
   "CREATE TABLE sneaky (id TEXT PRIMARY KEY)",
   "BEGIN",
@@ -120,11 +120,11 @@ for (const q of [
   r = await mcp.tool("test_call", { kind: "rpc", method: "probe", args: [q] });
   ok(r.v.result !== "allowed" && /not authorized|prohibited/i.test(r.v.result), `object code refused: ${q}`);
 }
-r = await mcp.tool("query_data", { sql: "SELECT * FROM _obj_checkins" });
+r = await mcp.tool("query_data", { sql: "SELECT * FROM _perch_checkins" });
 ok(r.isError, "query_data refuses reserved tables");
 r = await mcp.tool("query_data", { sql: "DELETE FROM todos", target: "preview" });
 ok(r.isError && /not authorized|readonly/i.test(r.text), "query_data refuses writes");
-r = await mcp.tool("propose_change", { message: "bad migration", migrations: [{ name: "x", sql: "DELETE FROM _obj_checkins" }] });
+r = await mcp.tool("propose_change", { message: "bad migration", migrations: [{ name: "x", sql: "DELETE FROM _perch_checkins" }] });
 ok(r.isError, "a migration cannot touch reserved tables");
 r = await mcp.tool("propose_change", { message: "no pk", migrations: [{ name: "x", sql: "CREATE TABLE t (a TEXT)" }] });
 ok(r.isError && r.text.includes("PRIMARY KEY"), "data tables need a primary key");
@@ -383,7 +383,7 @@ await m3.tool("call_object", { kind: "rpc", method: "add", args: ["agent mistake
 await m3.tool("call_object", { kind: "rpc", method: "setRetention", args: [5] });
 r = await m3.tool("list_changes", {});
 const ch = r.v.changes;
-ok(ch.length >= 3 && ch[0].event === "rpc" && ch[0].tables._obj_kv && ch[1].tables.todos.inserts === 1 && ch.every((c: any) => c.undoable), "list_changes shows events with rows per table");
+ok(ch.length >= 3 && ch[0].event === "rpc" && ch[0].tables._perch_kv && ch[1].tables.todos.inserts === 1 && ch.every((c: any) => c.undoable), "list_changes shows events with rows per table");
 const firstAdd = ch[2].id;
 r = await m3.tool("undo_changes", { back_to: ch[1].id });
 ok(!r.isError && r.v.undone.length === 2 && r.v.tables.todos.deletes === 1, "undo_changes reverses the two newest changes");

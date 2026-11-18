@@ -11,11 +11,11 @@ export const GET: APIRoute = ({ site }) => {
 > runs the object locally, exposes it to agents over MCP, and exports it to
 > Cloudflare with the class source unchanged.
 
-Version 0.1.0. File format_version 1, api_version perch-v0.
+Version 0.1.0. File format_version 2, api_version perch-v0. (Format 1 named the reserved tables _obj_*; perch renames them in place when it opens such a file.)
 
 ## The file
 
-An object file is a plain SQLite database. Tables named \`_obj_*\` are
+An object file is a plain SQLite database. Tables named \`_perch_*\` are
 reserved for the runtime; every other table is the object's own data, created
 only by migrations and reached by object code through \`ctx.storage.sql\`.
 
@@ -30,7 +30,7 @@ Preview: propose_change works on a sibling copy, \`<file>.preview\`.
 
 ## Writing an object
 
-- Entry file \`src/index.ts\` exports the class named in \`_obj_meta.class\`,
+- Entry file \`src/index.ts\` exports the class named in \`_perch_meta.class\`,
   extending \`DurableObject\` from "cloudflare:workers". Constructor is
   (ctx, env); call super(ctx, env).
 - Single-threaded; each event (fetch, RPC, alarm) is one SQLite transaction.
@@ -38,7 +38,7 @@ ${RUNTIME.map((r) => `- ${r.api}: ${r.note}`).join('\n')}
 - Globals: Request, Response, Headers, URL, URLSearchParams, TextEncoder,
   TextDecoder, crypto.randomUUID, crypto.getRandomValues, setTimeout,
   structuredClone, atob, btoa, console.
-- A SQLite authorizer refuses, from object code: any access to \`_obj_*\`
+- A SQLite authorizer refuses, from object code: any access to \`_perch_*\`
   tables, DDL (CREATE/ALTER/DROP), BEGIN/COMMIT/SAVEPOINT, ATTACH, and all
   pragmas except read-only introspection (table_info, table_xinfo,
   table_list, index_list, index_info, index_xinfo, foreign_key_list).
@@ -117,7 +117,7 @@ ${NOT_YET.map((n) => `- ${n}`).join('\n')}
 
 - ${base}/ : overview and quick start
 - ${base}/run : open a .perch and run it in the browser (SQLite as WebAssembly, the same bootstrap as the native runtime; nothing is uploaded)
-- ${base}/format : the _obj_ tables
+- ${base}/format : the _perch_ tables
 `;
 
   return new Response(body, {

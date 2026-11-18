@@ -1,7 +1,7 @@
 /* perch
  *
  * The page is drawn like the file it describes: a SQLite database seen from
- * the inside. Reserved _obj_ tables are hatched in amber (the runtime's
+ * the inside. Reserved _perch_ tables are hatched in amber (the runtime's
  * half, object code cannot reach it), data tables are solid green (the
  * object's half). Everything else is ink on page.
  *
@@ -186,7 +186,7 @@ body::before {
   .split { grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.1fr); align-items: start; }
 }
 
-/* Hatched = reserved. Used for _obj_ rows everywhere. */
+/* Hatched = reserved. Used for _perch_ rows everywhere. */
 .hatch {
   background-image: repeating-linear-gradient(
     -45deg,

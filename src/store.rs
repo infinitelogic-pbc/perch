@@ -1,7 +1,7 @@
 //! The object file: one SQLite database holding a Durable Object's code,
 //! history, runtime state and data.
 //!
-//! Reserved tables all start with `_obj_`. Everything else is the object's
+//! Reserved tables all start with `_perch_`. Everything else is the object's
 //! own data, created only by migrations. The authorizer installed in
 //! [`Store::open`] enforces that boundary according to the current [`Mode`].
 
@@ -17,7 +17,9 @@ use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-pub const FORMAT_VERSION: i64 = 1;
+pub const FORMAT_VERSION: i64 = 2;
+/// The reserved tables of format 1, without their `_obj_` prefix.
+const V1_TABLES: &[&str] = &["meta", "blobs", "checkins", "migrations", "kv", "alarms", "changes"];
 pub const API_VERSION: &str = "perch-v0";
 pub const DEFAULT_MAIN: &str = "src/index.ts";
 
@@ -55,7 +57,7 @@ impl ModeCell {
 }
 
 fn reserved(name: &str) -> bool {
-    name.starts_with("_obj_")
+    name.starts_with("_perch_")
 }
 
 fn internal(name: &str) -> bool {
@@ -140,9 +142,9 @@ fn authorize(mode: Mode, ctx: AuthContext<'_>) -> Authorization {
 }
 
 const SCHEMA: &str = r#"
-CREATE TABLE _obj_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-CREATE TABLE _obj_blobs (hash TEXT PRIMARY KEY, size INTEGER NOT NULL, data BLOB NOT NULL);
-CREATE TABLE _obj_checkins (
+CREATE TABLE _perch_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+CREATE TABLE _perch_blobs (hash TEXT PRIMARY KEY, size INTEGER NOT NULL, data BLOB NOT NULL);
+CREATE TABLE _perch_checkins (
   id TEXT PRIMARY KEY,
   parent TEXT,
   manifest TEXT NOT NULL,
@@ -150,20 +152,20 @@ CREATE TABLE _obj_checkins (
   created_at INTEGER NOT NULL,
   schema TEXT
 );
-CREATE TABLE _obj_migrations (
+CREATE TABLE _perch_migrations (
   seq INTEGER PRIMARY KEY,
   name TEXT NOT NULL,
   sql TEXT NOT NULL,
   checkin TEXT NOT NULL,
   applied_at INTEGER NOT NULL
 );
-CREATE TABLE _obj_kv (key TEXT PRIMARY KEY, value BLOB NOT NULL);
-CREATE TABLE _obj_alarms (
+CREATE TABLE _perch_kv (key TEXT PRIMARY KEY, value BLOB NOT NULL);
+CREATE TABLE _perch_alarms (
   id INTEGER PRIMARY KEY CHECK (id = 1),
   scheduled_at INTEGER NOT NULL,
   retry_count INTEGER NOT NULL DEFAULT 0
 );
-CREATE TABLE _obj_changes (
+CREATE TABLE _perch_changes (
   id INTEGER PRIMARY KEY,
   at INTEGER NOT NULL,
   event TEXT NOT NULL,
@@ -232,12 +234,54 @@ impl Store {
             bail!("no object file at {}", path.display());
         }
         let s = Self::open_raw(path)?;
+        s.upgrade_v1()?;
         let v: Option<String> = s.meta("format_version")?;
         match v.as_deref() {
-            Some("1") => Ok(s),
+            Some("2") => Ok(s),
             Some(other) => bail!("unsupported object file format version {other}"),
             None => bail!("{} is not a portable object file", path.display()),
         }
+    }
+
+    /// Format 1 named its reserved tables `_obj_*`. Format 2 names them
+    /// `_perch_*`, so everything the runtime owns (including a permission
+    /// engine's tables, `_perch_pemba_*`) sits under one prefix. A format 1
+    /// file is upgraded in place the first time it is opened: the tables are
+    /// renamed in one transaction, and nothing else changes.
+    fn upgrade_v1(&self) -> Result<()> {
+        self.with_mode(Mode::Privileged, |c| -> Result<()> {
+            let has = |name: &str| -> rusqlite::Result<bool> {
+                c.query_row(
+                    "SELECT count(*) FROM sqlite_master WHERE type='table' AND name=?",
+                    [name],
+                    |r| r.get::<_, i64>(0),
+                )
+                .map(|n| n > 0)
+            };
+            if !has("_obj_meta")? || has("_perch_meta")? {
+                return Ok(());
+            }
+            c.execute_batch("BEGIN IMMEDIATE")?;
+            let r = (|| -> rusqlite::Result<()> {
+                for t in V1_TABLES {
+                    if has(&format!("_obj_{t}"))? {
+                        c.execute_batch(&format!("ALTER TABLE _obj_{t} RENAME TO _perch_{t}"))?;
+                    }
+                }
+                c.execute("UPDATE _perch_meta SET value='2' WHERE key='format_version'", [])?;
+                Ok(())
+            })();
+            match r {
+                Ok(()) => {
+                    c.execute_batch("COMMIT; PRAGMA wal_checkpoint(PASSIVE);")?;
+                    Ok(())
+                }
+                Err(e) => {
+                    let _ = c.execute_batch("ROLLBACK");
+                    Err(anyhow!("upgrading the file from format 1 failed, and it was left unchanged: {e}"))
+                }
+            }
+        })
     }
 
     fn open_raw(path: &Path) -> Result<Store> {
@@ -307,10 +351,10 @@ impl Store {
 
     pub fn meta(&self, key: &str) -> Result<Option<String>> {
         self.with_mode(Mode::Privileged, |c| {
-            // _obj_meta may not exist when probing a foreign file.
+            // _perch_meta may not exist when probing a foreign file.
             let exists: bool = c
                 .query_row(
-                    "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='_obj_meta'",
+                    "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='_perch_meta'",
                     [],
                     |r| r.get::<_, i64>(0),
                 )
@@ -318,7 +362,7 @@ impl Store {
             if !exists {
                 return Ok(None);
             }
-            Ok(c.query_row("SELECT value FROM _obj_meta WHERE key=?", [key], |r| r.get(0))
+            Ok(c.query_row("SELECT value FROM _perch_meta WHERE key=?", [key], |r| r.get(0))
                 .optional()?)
         })
     }
@@ -330,7 +374,7 @@ impl Store {
     pub fn set_meta(&self, key: &str, value: &str) -> Result<()> {
         self.with_mode(Mode::Privileged, |c| {
             c.execute(
-                "INSERT INTO _obj_meta(key, value) VALUES (?, ?)
+                "INSERT INTO _perch_meta(key, value) VALUES (?, ?)
                  ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                 [key, value],
             )
@@ -340,7 +384,7 @@ impl Store {
 
     pub fn delete_meta(&self, key: &str) -> Result<()> {
         self.with_mode(Mode::Privileged, |c| {
-            c.execute("DELETE FROM _obj_meta WHERE key=?", [key])
+            c.execute("DELETE FROM _perch_meta WHERE key=?", [key])
         })?;
         Ok(())
     }
@@ -349,7 +393,7 @@ impl Store {
         let hash = sha256_hex(data);
         self.with_mode(Mode::Privileged, |c| {
             c.execute(
-                "INSERT OR IGNORE INTO _obj_blobs(hash, size, data) VALUES (?, ?, ?)",
+                "INSERT OR IGNORE INTO _perch_blobs(hash, size, data) VALUES (?, ?, ?)",
                 params![hash, data.len() as i64, data],
             )
         })?;
@@ -358,7 +402,7 @@ impl Store {
 
     pub fn blob(&self, hash: &str) -> Result<Vec<u8>> {
         self.with_mode(Mode::Privileged, |c| {
-            c.query_row("SELECT data FROM _obj_blobs WHERE hash=?", [hash], |r| r.get(0))
+            c.query_row("SELECT data FROM _perch_blobs WHERE hash=?", [hash], |r| r.get(0))
                 .optional()
         })?
         .ok_or_else(|| anyhow!("missing blob {hash}"))
@@ -393,7 +437,7 @@ impl Store {
         );
         self.with_mode(Mode::Privileged, |c| {
             c.execute(
-                "INSERT INTO _obj_checkins(id, parent, manifest, message, created_at) VALUES (?, ?, ?, ?, ?)",
+                "INSERT INTO _perch_checkins(id, parent, manifest, message, created_at) VALUES (?, ?, ?, ?, ?)",
                 params![id, parent, manifest_json, message, created_at],
             )
         })?;
@@ -404,7 +448,7 @@ impl Store {
         let id = self.resolve_checkin(id)?;
         self.with_mode(Mode::Privileged, |c| {
             c.query_row(
-                "SELECT id, parent, manifest, message, created_at, schema FROM _obj_checkins WHERE id=?",
+                "SELECT id, parent, manifest, message, created_at, schema FROM _perch_checkins WHERE id=?",
                 [&id],
                 row_to_checkin,
             )
@@ -418,7 +462,7 @@ impl Store {
             bail!("check-in id {id:?} is too short");
         }
         let ids: Vec<String> = self.with_mode(Mode::Privileged, |c| {
-            let mut st = c.prepare("SELECT id FROM _obj_checkins WHERE id LIKE ? || '%'")?;
+            let mut st = c.prepare("SELECT id FROM _perch_checkins WHERE id LIKE ? || '%'")?;
             let v = st
                 .query_map([id], |r| r.get(0))?
                 .collect::<rusqlite::Result<Vec<String>>>();
@@ -434,7 +478,7 @@ impl Store {
     pub fn checkins(&self) -> Result<Vec<Checkin>> {
         self.with_mode(Mode::Privileged, |c| {
             let mut st = c.prepare(
-                "SELECT id, parent, manifest, message, created_at, schema FROM _obj_checkins ORDER BY created_at DESC",
+                "SELECT id, parent, manifest, message, created_at, schema FROM _perch_checkins ORDER BY created_at DESC",
             )?;
             let v = st
                 .query_map([], row_to_checkin)?
@@ -468,7 +512,7 @@ impl Store {
     pub fn migrations(&self) -> Result<Vec<(i64, String, String, String, i64)>> {
         self.with_mode(Mode::Privileged, |c| {
             let mut st = c.prepare(
-                "SELECT seq, name, sql, checkin, applied_at FROM _obj_migrations ORDER BY seq",
+                "SELECT seq, name, sql, checkin, applied_at FROM _perch_migrations ORDER BY seq",
             )?;
             let v = st
                 .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))?
@@ -493,7 +537,7 @@ impl Store {
                 .map_err(|e| anyhow!("migration {:?} failed: {e}", m.name))?;
             self.with_mode(Mode::Privileged, |c| {
                 c.execute(
-                    "INSERT INTO _obj_migrations(name, sql, checkin, applied_at) VALUES (?, ?, ?, ?)",
+                    "INSERT INTO _perch_migrations(name, sql, checkin, applied_at) VALUES (?, ?, ?, ?)",
                     params![m.name, m.sql, checkin, now_ms()],
                 )
             })?;
@@ -530,7 +574,7 @@ impl Store {
     pub fn schema(&self) -> Result<Schema> {
         self.with_mode(Mode::Privileged, |c| {
             let mut tables = c.prepare(
-                "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE '\\_obj\\_%' ESCAPE '\\' AND name NOT LIKE 'sqlite\\_%' ESCAPE '\\' ORDER BY name",
+                "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE '\\_perch\\_%' ESCAPE '\\' AND name NOT LIKE 'sqlite\\_%' ESCAPE '\\' ORDER BY name",
             )?;
             let names = tables
                 .query_map([], |r| r.get::<_, String>(0))?
@@ -558,7 +602,7 @@ impl Store {
     pub fn snapshot_schema(&self, checkin: &str) -> Result<()> {
         let s = serde_json::to_string(&self.schema()?)?;
         self.with_mode(Mode::Privileged, |c| {
-            c.execute("UPDATE _obj_checkins SET schema=? WHERE id=?", [&s, checkin])
+            c.execute("UPDATE _perch_checkins SET schema=? WHERE id=?", [&s, checkin])
         })?;
         Ok(())
     }
@@ -577,7 +621,7 @@ impl Store {
 
     pub fn alarm(&self) -> Result<Option<(i64, i64)>> {
         Ok(self.with_mode(Mode::Privileged, |c| {
-            c.query_row("SELECT scheduled_at, retry_count FROM _obj_alarms WHERE id=1", [], |r| {
+            c.query_row("SELECT scheduled_at, retry_count FROM _perch_alarms WHERE id=1", [], |r| {
                 Ok((r.get(0)?, r.get(1)?))
             })
             .optional()

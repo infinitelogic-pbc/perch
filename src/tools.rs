@@ -148,7 +148,7 @@ fn commit_checkin(
         let id = store.insert_checkin(parent, &manifest, message)?;
         let conn = store.conn.clone();
         let mut session = Session::new(&conn)?;
-        session.table_filter(Some(|t: &str| !t.starts_with("_obj_") || t == "_obj_kv"));
+        session.table_filter(Some(|t: &str| !t.starts_with("_perch_") || t == "_perch_kv"));
         session.attach::<&str>(None)?;
         let warnings = store.apply_migrations(migrations, &id)?;
         let mut cs = Vec::new();
@@ -157,7 +157,7 @@ fn commit_checkin(
         if !cs.is_empty() {
             store.with_mode(Mode::Privileged, |c| {
                 c.execute(
-                    "INSERT INTO _obj_changes(at, event, checkin, changeset) VALUES (?, 'migration', ?, ?)",
+                    "INSERT INTO _perch_changes(at, event, checkin, changeset) VALUES (?, 'migration', ?, ?)",
                     rusqlite::params![now_ms(), id, cs],
                 )
             })?;
@@ -275,10 +275,10 @@ impl Tools {
             .collect();
         let alarm = s.alarm()?;
         let kv_keys: i64 = s.with_mode(Mode::Privileged, |c| {
-            c.query_row("SELECT count(*) FROM _obj_kv", [], |r| r.get(0))
+            c.query_row("SELECT count(*) FROM _perch_kv", [], |r| r.get(0))
         })?;
         let changes: i64 = s.with_mode(Mode::Privileged, |c| {
-            c.query_row("SELECT count(*) FROM _obj_changes", [], |r| r.get(0))
+            c.query_row("SELECT count(*) FROM _perch_changes", [], |r| r.get(0))
         })?;
         let file_bytes = std::fs::metadata(&s.path).map(|m| m.len()).unwrap_or(0);
         Ok(json!({
@@ -616,7 +616,7 @@ impl Tools {
         if c.kind == "alarm" && (o.ok || o.alarm_missing) && !o.alarm_touched {
             // An alarm run by hand clears the pending alarm the way a fired one
             // does: only if the handler did not set or delete it itself.
-            h.store.with_mode(Mode::Privileged, |c| c.execute("DELETE FROM _obj_alarms", []))?;
+            h.store.with_mode(Mode::Privileged, |c| c.execute("DELETE FROM _perch_alarms", []))?;
         }
         v["next_alarm"] = alarm_json(h.store.alarm()?);
         Ok(v)
@@ -826,7 +826,7 @@ impl Tools {
     fn change_rows(s: &Store, where_sql: &str, arg: i64) -> Result<Vec<(i64, i64, String, Option<String>, Vec<u8>)>> {
         s.with_mode(Mode::Privileged, |c| {
             let mut st = c.prepare(&format!(
-                "SELECT id, at, event, checkin, changeset FROM _obj_changes {where_sql} ORDER BY id DESC"
+                "SELECT id, at, event, checkin, changeset FROM _perch_changes {where_sql} ORDER BY id DESC"
             ))?;
             let v = st
                 .query_map([arg], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))?
@@ -838,7 +838,7 @@ impl Tools {
 
     fn last_migration_at(s: &Store) -> Result<i64> {
         Ok(s.with_mode(Mode::Privileged, |c| {
-            c.query_row("SELECT coalesce(max(applied_at), 0) FROM _obj_migrations", [], |r| r.get(0))
+            c.query_row("SELECT coalesce(max(applied_at), 0) FROM _perch_migrations", [], |r| r.get(0))
         })?)
     }
 
@@ -891,7 +891,7 @@ impl Tools {
         let r = (|| {
             let conn = s.conn.clone();
             let mut session = Session::new(&conn)?;
-            session.table_filter(Some(|t: &str| !t.starts_with("_obj_") || t == "_obj_kv"));
+            session.table_filter(Some(|t: &str| !t.starts_with("_perch_") || t == "_perch_kv"));
             session.attach::<&str>(None)?;
             for (id, _, _, _, cs) in &rows {
                 let mut inverted = Vec::new();
@@ -909,7 +909,7 @@ impl Tools {
             session.changeset_strm(&mut cs)?;
             drop(session);
             conn.execute(
-                "INSERT INTO _obj_changes(at, event, checkin, changeset) VALUES (?, 'undo', ?, ?)",
+                "INSERT INTO _perch_changes(at, event, checkin, changeset) VALUES (?, 'undo', ?, ?)",
                 rusqlite::params![now_ms(), s.live_checkin()?, cs],
             )?;
             let new_id = conn.last_insert_rowid();

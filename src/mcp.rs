@@ -19,7 +19,7 @@ Writing the object:
 - The entry file is src/index.ts. It exports the object's class (the name describe_object reports) extending DurableObject from "cloudflare:workers". Constructor signature is (ctx, env); call super(ctx, env).
 - Handlers: async fetch(request: Request): Promise<Response>; public methods are RPC (callable over HTTP as POST /.perch/rpc/<method> with a JSON array of args); async alarm() runs when ctx.storage.setAlarm(epochMs) comes due.
 - Storage: this.ctx.storage.sql.exec(sql, ...bindings) returns a cursor (.toArray(), .one(), .raw(), rowsWritten). this.ctx.storage.get/put/delete/list is the key-value half. ctx.storage.transactionSync(fn) for atomic multi-statement writes. Every event already runs in its own transaction.
-- Schema changes go ONLY in propose_change migrations (ordered, forward-only SQL). Object code cannot CREATE/ALTER/DROP, and cannot touch _obj_* tables.
+- Schema changes go ONLY in propose_change migrations (ordered, forward-only SQL). Object code cannot CREATE/ALTER/DROP, and cannot touch _perch_* tables.
 - Data tables need a declared PRIMARY KEY; use UUIDv7 TEXT keys (crypto.randomUUID() is v4; build v7 from Date.now() + crypto.getRandomValues) rather than INTEGER/AUTOINCREMENT so copies of the file can merge changesets later.
 - Web pages: files under public/ are static and served before fetch() without waking the object (public/index.html at /, public/about.html at /about, public/docs/index.html at /docs/; /about.html redirects to /about; GET/HEAD only; ETag + 304). Unmatched requests go to fetch(). Binary files (images, fonts) are { "base64": "..." } in propose_change. Templates for dynamic pages can be imported as strings: import page from "./page.html" (also .txt .sql .css .md .svg). The same layout exports to Cloudflare Static Assets unchanged.
 - Editing: after the first version, change files with propose_change `edits` (exact old/new string replacement) instead of resending whole files.
@@ -103,7 +103,7 @@ fn tools_list() -> Value {
         {
             "name": "query_data",
             "title": "Query data",
-            "description": "Read-only SQL over the object's own tables (SQLite dialect, see https://sqlite.org/lang_select.html). Reserved _obj_* tables and all writes are refused. target \"preview\" reads the preview copy after a test_call. At most 500 rows.",
+            "description": "Read-only SQL over the object's own tables (SQLite dialect, see https://sqlite.org/lang_select.html). Reserved _perch_* tables and all writes are refused. target \"preview\" reads the preview copy after a test_call. At most 500 rows.",
             "inputSchema": { "type": "object", "properties": {
                 "sql": { "type": "string" },
                 "params": { "type": "array", "description": "positional ? bindings" },
