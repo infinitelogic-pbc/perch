@@ -331,15 +331,7 @@
     }
   }
   function kvEncode(v) { return core.encode(JSON.stringify(kvTag(v, []))); }
-  function kvDecode(bytes) {
-    // Files written before the portable encoding hold V8's own serialization
-    // (first byte 0xFF). The native runtime still reads those; others cannot.
-    if (bytes.length && bytes[0] === 0xff) {
-      if (typeof core.deserialize === "function") return core.deserialize(bytes);
-      throw new Error("this value was stored by an older perch in a V8-only format; open the object once with the perch binary and write the key again to convert it");
-    }
-    return kvUntag(JSON.parse(core.decode(bytes)));
-  }
+  function kvDecode(bytes) { return kvUntag(JSON.parse(core.decode(bytes))); }
 
   // ------------------------------------------------------------ storage
   function bind(v) {

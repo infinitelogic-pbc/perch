@@ -11,7 +11,7 @@ export const GET: APIRoute = ({ site }) => {
 > runs the object locally, exposes it to agents over MCP, and exports it to
 > Cloudflare with the class source unchanged.
 
-Version 0.1.0. File format_version 2, api_version perch-v0. (Format 1 named the reserved tables _obj_*; perch renames them in place when it opens such a file.)
+Version 0.1.0. File format_version 2, api_version perch-v0. The format is still moving: perch reads only the current version and does not convert older files.
 
 ## The file
 

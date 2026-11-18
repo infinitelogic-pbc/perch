@@ -101,19 +101,8 @@ export class ObjRuntime {
     );
     this.db.checkRc(rc);
     this.db.exec("PRAGMA foreign_keys = ON");
-    // Format 1 named its reserved tables _obj_*. Rename them, as the native
-    // binary does on open; the file is saved in format 2.
-    const has = (t: string) => !!this.db.selectValue("SELECT count(*) FROM sqlite_master WHERE type='table' AND name=?", [t]);
-    if (has("_obj_meta") && !has("_perch_meta")) {
-      this.db.exec("BEGIN");
-      for (const t of ["meta", "blobs", "checkins", "migrations", "kv", "alarms", "changes"]) {
-        if (has(`_obj_${t}`)) this.db.exec(`ALTER TABLE _obj_${t} RENAME TO _perch_${t}`);
-      }
-      this.db.exec("UPDATE _perch_meta SET value='2' WHERE key='format_version'; COMMIT;");
-      this.dirty = true;
-    }
     const v = this.meta("format_version");
-    if (v !== "2") throw new Error(v ? `unsupported object file format version ${v}` : "this SQLite file is not a portable object (no _perch_meta)");
+    if (v !== "2") throw new Error(v ? `this file is format version ${v}; this runtime reads only version 2 (older files are not converted)` : "this SQLite file is not a portable object (no _perch_meta)");
     const str = (x: any) => (typeof x === "number" ? (x ? wasm.cstrToJs(x) : null) : x ?? null);
     capi.sqlite3_set_authorizer(this.db.pointer, (_p: any, action: number, a1: any, a2: any, dbName: any) => {
       try {

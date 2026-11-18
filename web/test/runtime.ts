@@ -132,34 +132,6 @@ for (const q of ["SELECT * FROM _perch_meta", "UPDATE _perch_checkins SET messag
   ok(res !== "allowed" && /not authorized|prohibited|SQLITE_AUTH/i.test(res), `object code refused in the browser runtime: ${q}`);
 }
 ok((await p.rpc("run", ["INSERT INTO notes VALUES ('a', 'b')"]) as any).result === "allowed", "ordinary writes to data tables are allowed");
-p.close();
-
-// Format 1 files named the reserved tables _obj_*. Both runtimes upgrade them in place.
-const { Database } = await import("bun:sqlite");
-const v1 = join(dir, "v1.perch");
-sh(["new", v1, "--class", "Todo", "--name", "todo", "--from", join(ROOT, "examples/todo")]);
-sh(["call", v1, "add", '["written before the upgrade"]']);
-{
-  const db = new Database(v1);
-  for (const t of ["meta", "blobs", "checkins", "migrations", "kv", "alarms", "changes"]) db.run(`ALTER TABLE _perch_${t} RENAME TO _obj_${t}`);
-  db.run("UPDATE _obj_meta SET value='1' WHERE key='format_version'");
-  db.close();
-}
-const old = new Uint8Array(readFileSync(v1));
-const up = await ObjRuntime.open(old, { sqlite3, bootstrap, toUrl });
-ok(!up.loadError && up.dirty && up.info().tables[0].rows === 1, "the browser runtime opens a format 1 file, upgrades it in memory and marks it unsaved");
-const saved = join(dir, "v1-from-browser.perch");
-writeFileSync(saved, up.export());
-up.close();
-ok(sh(["describe", saved]).format_version === "2" && sh(["call", saved, "stats"]).result.total === 1, "the file it saves is format 2 and opens natively");
-const dn = sh(["describe", v1]);
-ok(dn.format_version === "2" && dn.tables[0].rows === 1 && sh(["test", v1]).passed === 8, "native perch upgrades a format 1 file in place, data and code intact");
-{
-  const db = new Database(v1);
-  const names = (db.query("SELECT name FROM sqlite_master WHERE type='table'").all() as { name: string }[]).filter((r) => r.name.startsWith("_obj_"));
-  db.close();
-  ok(names.length === 0, "no _obj_ tables remain after the upgrade");
-}
 
 console.log(`\n${n} checks passed (${dir})`);
 process.exit(0);

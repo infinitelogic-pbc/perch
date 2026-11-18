@@ -18,8 +18,6 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 pub const FORMAT_VERSION: i64 = 2;
-/// The reserved tables of format 1, without their `_obj_` prefix.
-const V1_TABLES: &[&str] = &["meta", "blobs", "checkins", "migrations", "kv", "alarms", "changes"];
 pub const API_VERSION: &str = "perch-v0";
 pub const DEFAULT_MAIN: &str = "src/index.ts";
 
@@ -234,54 +232,12 @@ impl Store {
             bail!("no object file at {}", path.display());
         }
         let s = Self::open_raw(path)?;
-        s.upgrade_v1()?;
         let v: Option<String> = s.meta("format_version")?;
         match v.as_deref() {
             Some("2") => Ok(s),
-            Some(other) => bail!("unsupported object file format version {other}"),
+            Some(other) => bail!("this file is format version {other}; this perch reads only version {FORMAT_VERSION} (the format is still moving, and older files are not converted)"),
             None => bail!("{} is not a portable object file", path.display()),
         }
-    }
-
-    /// Format 1 named its reserved tables `_obj_*`. Format 2 names them
-    /// `_perch_*`, so everything the runtime owns (including a permission
-    /// engine's tables, `_perch_pemba_*`) sits under one prefix. A format 1
-    /// file is upgraded in place the first time it is opened: the tables are
-    /// renamed in one transaction, and nothing else changes.
-    fn upgrade_v1(&self) -> Result<()> {
-        self.with_mode(Mode::Privileged, |c| -> Result<()> {
-            let has = |name: &str| -> rusqlite::Result<bool> {
-                c.query_row(
-                    "SELECT count(*) FROM sqlite_master WHERE type='table' AND name=?",
-                    [name],
-                    |r| r.get::<_, i64>(0),
-                )
-                .map(|n| n > 0)
-            };
-            if !has("_obj_meta")? || has("_perch_meta")? {
-                return Ok(());
-            }
-            c.execute_batch("BEGIN IMMEDIATE")?;
-            let r = (|| -> rusqlite::Result<()> {
-                for t in V1_TABLES {
-                    if has(&format!("_obj_{t}"))? {
-                        c.execute_batch(&format!("ALTER TABLE _obj_{t} RENAME TO _perch_{t}"))?;
-                    }
-                }
-                c.execute("UPDATE _perch_meta SET value='2' WHERE key='format_version'", [])?;
-                Ok(())
-            })();
-            match r {
-                Ok(()) => {
-                    c.execute_batch("COMMIT; PRAGMA wal_checkpoint(PASSIVE);")?;
-                    Ok(())
-                }
-                Err(e) => {
-                    let _ = c.execute_batch("ROLLBACK");
-                    Err(anyhow!("upgrading the file from format 1 failed, and it was left unchanged: {e}"))
-                }
-            }
-        })
     }
 
     fn open_raw(path: &Path) -> Result<Store> {

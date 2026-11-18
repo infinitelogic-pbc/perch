@@ -61,11 +61,11 @@ perch export my.perch out/ && (cd out && bunx wrangler deploy)
 
 | Table | Holds |
 | --- | --- |
-| `_perch_meta` | name, class, entry file, format version (2; format 1 files, which named these tables `_obj_*`, are upgraded in place when opened), runtime API version, the live check-in |
+| `_perch_meta` | name, class, entry file, format version (2), runtime API version, the live check-in |
 | `_perch_blobs` | content-addressed bytes (SHA-256 → contents): source files |
 | `_perch_checkins` | code history, Fossil style: id (SHA-256), parent, manifest (path → blob), message, time, schema snapshot |
 | `_perch_migrations` | ordered SQL migrations already applied, each tied to the check-in that introduced it |
-| `_perch_kv` | the key-value half of the storage API. Values are UTF-8 JSON that any runtime can read; what plain JSON cannot carry (Date, Map, Set, bytes, bigint, undefined, NaN) is tagged with `$perch`. Values written before this in V8's own format are still read by the native binary |
+| `_perch_kv` | the key-value half of the storage API. Values are UTF-8 JSON that any runtime can read; what plain JSON cannot carry (Date, Map, Set, bytes, bigint, undefined, NaN) is tagged with `$perch` |
 | `_perch_alarms` | the next scheduled alarm and its retry count |
 | `_perch_changes` | a session-extension changeset for every event that wrote data (audit log, later undo and sync) |
 | everything else | the object's data, created and changed only by migrations |
@@ -315,11 +315,16 @@ do locally. Moving state in or out of Cloudflare is not in v0.
   native perch in both directions: native builds a file, the WebAssembly runtime
   serves it (static files, fetch, RPC, alarm, the sandbox), and native opens
   what it saved, reads its KV values, undoes one of its changes and passes the
-  stored tests, and both runtimes upgrade a format 1 file (38 checks).
+  stored tests (34 checks).
 - `cd web && bun test/browser.ts` drives the real `/run` page in headless
   Chrome: the service worker, the app in its iframe, writes, download, and
   reopening from disk (23 checks). `bun test/smoke.ts <file.perch>` opens any
   object there and clicks around.
+
+## Compatibility
+
+The format is still moving. A change to it bumps `format_version`, and perch
+reads only the current version: there is no conversion of older files.
 
 ## Not yet
 
