@@ -28,7 +28,7 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if [ -n "${PERCH:-}" ]; then perch="$PERCH"
 elif [ -x "$here/../target/release/perch" ]; then perch="$here/../target/release/perch"
 elif command -v perch >/dev/null 2>&1; then perch="$(command -v perch)"
-else echo "perch-claude: no perch binary. Build it (cd perch && cargo build --release) or set PERCH=/path/to/perch" >&2; exit 1
+else echo "perch-claude: no perch binary. Build it (cargo build --release in the perch checkout) or set PERCH=/path/to/perch" >&2; exit 1
 fi
 perch="$(cd "$(dirname "$perch")" && pwd)/$(basename "$perch")"
 command -v claude >/dev/null 2>&1 || { echo "perch-claude: the claude CLI is not on PATH" >&2; exit 1; }

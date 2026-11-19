@@ -10,7 +10,7 @@
     "html_handling": "auto-trailing-slash"
   },
   "routes": [
-    { "pattern": "perch.__BASE_DOMAIN__", "custom_domain": true }
+    { "pattern": "perch.proc.io", "custom_domain": true }
   ],
   "observability": { "enabled": true }
 }

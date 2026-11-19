@@ -1,21 +1,12 @@
-import { readFileSync } from 'node:fs';
 import { defineConfig } from 'astro/config';
 
-// The domain comes from the repo's generated stack file, never hardcoded.
-// The fallback only feeds canonical URLs, so `astro build` works before
-// anyone has run `bun run configure`.
-let baseDomain = 'proc.io';
-try {
-  baseDomain = JSON.parse(
-    readFileSync(new URL('../../stack.generated.json', import.meta.url), 'utf8'),
-  ).baseDomain;
-} catch {
-  // not configured yet
-}
+// Where the site is served. Only canonical URLs and /llms.txt read it, so a
+// fork sets PERCH_SITE (and the route in wrangler.jsonc) and nothing else.
+const site = process.env.PERCH_SITE ?? 'https://perch.proc.io';
 
 export default defineConfig({
   output: 'static',
-  site: `https://perch.${baseDomain}`,
+  site,
   trailingSlash: 'never',
   build: { format: 'file' },
   vite: {

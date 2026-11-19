@@ -12,7 +12,8 @@ an agent can build and change the object without a separate dev environment.
 Build once (V8 comes prebuilt through `deno_core`):
 
 ```sh
-cd perch && cargo build --release
+git clone https://github.com/infinitelogic-pbc/perch && cd perch
+cargo build --release
 ```
 
 Then point `bin/perch-claude` at an object file. It opens a Claude session in a
@@ -449,4 +450,15 @@ the same file each hold their own isolate; in-memory fields on the class are
 per process, and only `perch run` fires alarms. `perch` and `.perch` are working
 names.
 
-Related: celld (self-hosted Workers and Durable Objects) and Rivet Actors.
+## License
+
+perch is free software: you can redistribute it and modify it under the terms
+of the GNU Affero General Public License, version 3, as published by the Free
+Software Foundation. It comes with no warranty. See [LICENSE](LICENSE).
+
+The license covers perch itself: the binary, the runtime, the browser runtime
+and the site. The objects you build with it, their code and their data, are
+yours. If you run a modified perch as a network service, the AGPL asks you to
+offer that modified source to its users.
+
+Copyright (C) 2026 [Infinite Logic PBC](https://infinitelogic.org).

@@ -3,7 +3,9 @@ name = "perch"
 version = "0.1.0"
 edition = "2024"
 description = "Portable Durable Objects: one SQLite file holding a Durable Object's code and data"
-license = "Apache-2.0"
+license = "AGPL-3.0-only"
+repository = "https://github.com/infinitelogic-pbc/perch"
+homepage = "https://perch.proc.io"
 
 [[bin]]
 name = "perch"
