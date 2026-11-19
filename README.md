@@ -43,6 +43,7 @@ when Claude exits. The object file stays where you put it.
 
 ```
 perch new my.perch --class Obj             # empty class, or --from <dir> with src/ + migrations/
+perch new shared.perch --like my.perch       # the same app with empty tables, for sharing
 perch mcp my.perch                         # MCP over stdio: the agent builds it
 perch run my.perch --port 8787             # serve HTTP, fire alarms
 perch call my.perch <method> '[args]'      # RPC from the shell
@@ -327,7 +328,7 @@ do locally. Moving state in or out of Cloudflare is not in v0.
   constructor throws, the export's assets config), edits, the stored-test
   release gate, and the directory rules
   below (annotations, read/write separation, enforced read-only calls), and bulk
-  import of static files (121 checks).
+  import of static files, and data-free copies (128 checks).
 - `bun test/http-calls.ts <base>` runs the same 17 HTTP calls (API, RPC, alarm,
   static files, an imported template) against any host; it passes against
   `perch run` and against the `perch export` deploy on Cloudflare.
@@ -340,6 +341,23 @@ do locally. Moving state in or out of Cloudflare is not in v0.
   Chrome: the service worker, the app in its iframe, writes, download, and
   reopening from disk (23 checks). `bun test/smoke.ts <file.perch>` opens any
   object there and clicks around.
+
+## Sharing an app without its data
+
+```sh
+perch new shared.perch --like my.perch
+```
+
+builds a new file with the same code, static files, stored tests and table
+definitions (tables, indexes, triggers, views), and nothing else: no rows, no
+key-value entries, no alarm, no earlier check-ins. The data is never written
+to the copy, so there is nothing to recover from it; deleting rows from a
+duplicate of the file would leave them in its free pages.
+
+The copy starts with one migration holding the current schema. The source's
+own migrations are not replayed, because a migration can be a data load. If
+the app needs reference data to work (a default list, settings), add it to
+the copy afterwards.
 
 ## Compatibility
 

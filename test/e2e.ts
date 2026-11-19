@@ -477,5 +477,33 @@ const exp = join(dir, "gallery-export");
 const ex = sh(["export", big, exp]);
 ok(ex.warnings.length === 0 && readFileSync(join(exp, "public/img/set0/p00000.jpg"), "utf8") === "a new version of photo 0", "export writes the imported files, with no warning under the Cloudflare limit");
 
+// ------------------------------------------------------------------ a copy without the data
+// The source has rows written at runtime, a key-value entry, an alarm, several
+// check-ins, and a migration that loads data, as a real app might.
+sh(["call", big, "add", '["a private row zq81"]']);
+sh(["call", big, "setRetention", "[12345]"]);
+const m5 = new Mcp(big);
+await m5.rpc("initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "e2e", version: "0" } });
+r = await m5.tool("propose_change", { message: "load data", migrations: [{ name: "0002_data", sql: "CREATE TABLE notes (id TEXT PRIMARY KEY, body TEXT NOT NULL); INSERT INTO notes (id, body) VALUES ('seed-1', 'loaded by a migration zq82'); CREATE INDEX notes_body ON notes (body);" }] });
+r = await m5.tool("release_change", {});
+ok(!r.isError, "the source has a migration that loads data");
+m5.close();
+const shared = join(dir, "shared.perch");
+const cp = sh(["new", shared, "--like", big]);
+const ds = sh(["describe", shared]);
+ok(cp.tables.includes("todos") && cp.tables.includes("notes") && ds.tables.every((t: any) => t.rows === 0) && ds.kv_keys === 0 && !ds.next_alarm, "perch new --like makes a copy with the same tables and no rows, key-value entries or alarm");
+ok(ds.public.files === sh(["describe", big]).public.files && ds.files.length === sh(["describe", big]).files.length, "the copy has the same code and static files");
+ok(sh(["checkins", shared]).total === 1 && ds.migrations_applied === 1, "the copy has one check-in and one schema migration: no history");
+const raw = readFileSync(shared).toString("latin1");
+ok(!raw.includes("zq81") && !raw.includes("zq82") && readFileSync(big).toString("latin1").includes("zq82"), "neither runtime rows nor migration-loaded rows are anywhere in the copy's bytes");
+const { Database } = await import("bun:sqlite");
+{
+  const db = new Database(shared);
+  const idx = (db.query("SELECT name FROM sqlite_master WHERE type='index' AND sql IS NOT NULL").all() as { name: string }[]).map((x) => x.name);
+  db.close();
+  ok(idx.includes("todos_done") && idx.includes("notes_body"), "indexes are carried over");
+}
+ok(sh(["test", shared]).passed === 8 && sh(["call", shared, "add", '["works"]']).result.title === "works", "the copy passes its stored tests and runs");
+
 console.log(`\n${passed} checks passed (${dir})`);
 process.exit(0);

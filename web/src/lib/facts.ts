@@ -83,7 +83,7 @@ export interface Command {
 }
 
 export const COMMANDS: Command[] = [
-  { usage: 'perch new <file> [--class C] [--name N] [--from DIR]', does: 'Create an object file: an empty class, or src/**, public/** and migrations/*.sql from a directory.' },
+  { usage: 'perch new <file> [--class C] [--name N] [--from DIR | --like FILE]', does: 'Create an object file: an empty class, or src/**, public/** and migrations/*.sql from a directory. With --like, a copy of another object without its data: the same code, static files, tests and table definitions, with empty tables and no history.' },
   { usage: 'perch run <file> [--port 8787] [--host 127.0.0.1] [--no-alarms]', does: 'Serve it over HTTP and fire its alarms.' },
   { usage: 'perch mcp <file>', does: 'The MCP server, over stdio.' },
   { usage: 'perch describe <file>', does: 'The description as JSON.' },

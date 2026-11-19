@@ -41,6 +41,10 @@ enum Cmd {
         /// Directory with src/**, optional public/** (static files) and migrations/*.sql
         #[arg(long)]
         from: Option<PathBuf>,
+        /// Another object file to copy without its data: the same code, static
+        /// files, tests and schema, with empty tables. For sharing an app.
+        #[arg(long, conflicts_with = "from")]
+        like: Option<PathBuf>,
     },
     /// Serve an object over HTTP and fire its alarms
     Run {
@@ -148,7 +152,59 @@ fn local<F: std::future::Future<Output = Result<()>>>(f: F) -> Result<()> {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.cmd {
-        Cmd::New { file, class, name, from } => {
+        Cmd::New { file, name, like: Some(source), .. } => {
+            // A copy without the data. Built from the live check-in's files and
+            // the source's current table definitions, so no row, key-value entry,
+            // alarm or earlier version of the code is carried. Nothing is deleted
+            // from a copy: the data is never written in the first place. The
+            // source's migrations are not replayed, because a migration can be
+            // a data load; the copy starts with one migration holding the schema.
+            let src = Store::open(&source)?;
+            let live = src.live_checkin()?;
+            let name = name.unwrap_or(src.meta_req("name")?);
+            let class = src.meta_req("class")?;
+            let code = src.code_files_at(&live)?;
+            let manifest_src = src.manifest_at(&live)?;
+            let ddl: Vec<String> = src.with_mode(store::Mode::Privileged, |c| -> rusqlite::Result<Vec<String>> {
+                // Tables first, then the indexes, triggers and views that depend on them.
+                let mut st = c.prepare(
+                    "SELECT sql FROM sqlite_master
+                     WHERE sql IS NOT NULL
+                       AND name NOT LIKE '\\_perch\\_%' ESCAPE '\\' AND tbl_name NOT LIKE '\\_perch\\_%' ESCAPE '\\'
+                       AND name NOT LIKE 'sqlite\\_%' ESCAPE '\\'
+                     ORDER BY CASE type WHEN 'table' THEN 0 WHEN 'index' THEN 1 WHEN 'view' THEN 2 ELSE 3 END, rowid",
+                )?;
+                st.query_map([], |r| r.get(0))?.collect()
+            })?;
+            let migrations: Vec<Migration> = if ddl.is_empty() {
+                vec![]
+            } else {
+                vec![Migration { name: "0001_schema".into(), sql: ddl.join(";\n") + ";\n" }]
+            };
+            let msg = format!("copy of {} at {}, without data", src.meta_req("name")?, &live[..12]);
+            let mut statics = 0usize;
+            let s = Store::create_with(&file, &name, &class, &code, &migrations, &msg, |st, manifest| {
+                for (path, hash) in &manifest_src {
+                    if path.starts_with(store::PUBLIC_DIR) {
+                        manifest.insert(path.clone(), st.put_blob(&src.blob(hash)?)?);
+                        statics += 1;
+                    }
+                }
+                Ok(())
+            })?;
+            print(&json!({
+                "created": file.display().to_string(),
+                "like": source.display().to_string(),
+                "name": name,
+                "class": class,
+                "checkin": s.live_checkin()?,
+                "files": code.keys().collect::<Vec<_>>(),
+                "public_files": statics,
+                "tables": s.schema()?.keys().collect::<Vec<_>>(),
+                "note": "tables are empty: no rows, key-value entries, alarm, code history or earlier migrations were copied. If the app needs reference data to work (a default list, settings), add it after copying.",
+            }));
+        }
+        Cmd::New { file, class, name, from, .. } => {
             let stem = file.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "object".into());
             let name = name.unwrap_or_else(|| stem.clone());
             let class = class.unwrap_or_else(|| {
