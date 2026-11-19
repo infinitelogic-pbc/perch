@@ -68,7 +68,7 @@ import Base from '../layouts/Base.astro';
   type Info = {
     name: string; class: string; checkin: string; message: string;
     tables: { name: string; rows: number }[]; files: string[]; public: string[];
-    kvKeys: number; changesets: number; checkins: number; nextAlarm: number | null; loadError: string | null;
+    kvKeys: number; checkins: number; nextAlarm: number | null; loadError: string | null;
   };
   const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
   const startStatus = $("start-status"), saveStatus = $("save-status");
@@ -156,7 +156,7 @@ import Base from '../layouts/Base.astro';
       ["Object", info.name], ["Class", info.class],
       ["Live check-in", `${info.checkin.slice(0, 12)} (${info.message})`], ["Check-ins", String(info.checkins)],
       ["Code files", String(info.files.length)], ["Static files", String(info.public.length)],
-      ["Key-value keys", String(info.kvKeys)], ["Recorded changes", String(info.changesets)], ["Next alarm", alarm],
+      ["Key-value keys", String(info.kvKeys)], ["Next alarm", alarm],
     ];
     $("facts").replaceChildren(...facts.flatMap(([k, v]) => {
       const dt = document.createElement("dt"), dd = document.createElement("dd");

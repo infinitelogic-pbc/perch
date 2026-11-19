@@ -4,7 +4,7 @@ import { RESERVED } from '../lib/facts';
 ---
 <Base
   title="The format: perch"
-  description="Inside a portable durable object file: the reserved _perch_ tables that hold code, history, migrations, KV, the alarm and changesets, and the data tables that belong to the object."
+  description="Inside a portable durable object file: the reserved _perch_ tables that hold code, history, migrations, KV and the alarm, and the data tables that belong to the object."
 >
   <div class="wrap head stack">
     <p class="eyebrow">Format version 1 · api perch-v0</p>
@@ -50,7 +50,7 @@ import { RESERVED } from '../lib/facts';
       </div>
       <div class="stack rules">
         <p><strong>A declared PRIMARY KEY on every table.</strong> A migration that creates one without is refused.</p>
-        <p><strong>No AUTOINCREMENT.</strong> Use UUIDv7 text keys, so copies of a file can merge changesets later. The to-do example ships a 14-line <code>uuidv7()</code>.</p>
+        <p><strong>No AUTOINCREMENT.</strong> Use UUIDv7 text keys, so two copies of a file never mint the same key. The to-do example ships a 14-line <code>uuidv7()</code>.</p>
         <p><strong>Forward only.</strong> Migrations run in order, are recorded with the check-in that brought them, and are never undone.</p>
       </div>
     </div>
@@ -92,14 +92,6 @@ SELECT data FROM _perch_blobs WHERE hash = '9f2c…';</pre>
           <code>query_data</code> with <code>target: "preview"</code> work on that copy.
           <code>release_change</code> replays the migrations on the live file, and is refused if
           live moved since the preview was made.
-        </p>
-      </div>
-      <div class="stack">
-        <h2>Writes leave a trail</h2>
-        <p>
-          Each event is one SQLite transaction with a session attached. When it writes, its
-          changeset goes into <code>_perch_changes</code> before commit, labelled with the event kind
-          (fetch, rpc, alarm) and the check-in that ran.
         </p>
       </div>
     </div>

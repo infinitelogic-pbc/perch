@@ -1,6 +1,7 @@
 //! The object host: owns one object file and one engine, and runs events one
-//! at a time. Every event is one SQLite transaction with a session attached;
-//! its changeset is recorded in `_perch_changes` before commit.
+//! at a time. Every event is one SQLite transaction. A session is attached for
+//! its duration only to count the rows it changed, which the caller sees in
+//! the result; nothing about the change is stored.
 
 use std::collections::BTreeMap;
 use std::io::Read;
@@ -84,8 +85,6 @@ pub struct Host {
     asset_index: std::cell::RefCell<Option<(String, std::rc::Rc<crate::store::Manifest>)>>,
     /// Test files to load alongside the class (scratch objects only).
     tests: Vec<String>,
-    /// The data epoch the engine was built at; an undo bumps it.
-    epoch: Option<String>,
     /// The next event is a read: writes are refused and the transaction is rolled back.
     read_only: bool,
 }
@@ -126,7 +125,6 @@ impl Host {
             pending_logs: vec![],
             asset_index: std::cell::RefCell::new(None),
             tests: vec![],
-            epoch: None,
             read_only: false,
         })
     }
@@ -142,12 +140,9 @@ impl Host {
     /// the constructor) when the live check-in moved since the last event.
     pub async fn ensure(&mut self) -> Result<()> {
         let live = self.store.live_checkin()?;
-        // An undo rewrites data under the instance; rebuild so in-memory state is fresh.
-        let epoch = self.store.meta("data_epoch")?;
-        if self.engine.is_some() && self.loaded.as_deref() == Some(live.as_str()) && self.epoch == epoch {
+        if self.engine.is_some() && self.loaded.as_deref() == Some(live.as_str()) {
             return Ok(());
         }
-        self.epoch = epoch;
         self.engine = None;
         self.loaded = None;
         // Code only: static files under public/ are never loaded to run the class.
@@ -166,7 +161,7 @@ impl Host {
         .await?;
         self.engine = Some(engine);
         let ev = json!({ "kind": "init", "className": class, "name": name, "env": {} });
-        let (r, _cs) = self.run_in_txn("init", &live, ev, None).await?;
+        let (r, _cs) = self.run_in_txn(ev, None).await?;
         let logs = self.engine.as_mut().map(|e| e.take_logs()).unwrap_or_default();
         if let Err(e) = r {
             self.engine = None;
@@ -180,8 +175,6 @@ impl Host {
 
     async fn run_in_txn(
         &mut self,
-        label: &str,
-        checkin: &str,
         ev: Value,
         body: Option<Vec<u8>>,
     ) -> Result<(std::result::Result<Dispatched, String>, Vec<u8>)> {
@@ -204,12 +197,6 @@ impl Host {
             session.changeset_strm(&mut cs)?;
             drop(session);
             let r = r?;
-            if !cs.is_empty() {
-                conn.execute(
-                    "INSERT INTO _perch_changes(at, event, checkin, changeset) VALUES (?, ?, ?, ?)",
-                    rusqlite::params![now_ms(), label, checkin, cs],
-                )?;
-            }
             Ok::<_, anyhow::Error>((r, cs))
         }
         .await;
@@ -237,7 +224,7 @@ impl Host {
     }
 
     /// Serve a GET/HEAD from `public/` if a file matches. Never touches the
-    /// engine: no constructor, no transaction, no changeset.
+    /// engine: no constructor and no transaction.
     fn try_asset(&self, method: &str, url: &str, headers: &[(String, String)]) -> Result<Option<Outcome>> {
         if method != "GET" && method != "HEAD" {
             return Ok(None);
@@ -330,30 +317,26 @@ impl Host {
         }
         self.ensure().await?;
         let checkin = self.loaded.clone().unwrap_or_default();
-        let (label, json, body) = match ev {
+        let (json, body) = match ev {
             Event::Fetch { method, url, headers, body } => (
-                "fetch",
                 json!({ "kind": "fetch", "method": method, "url": url, "headers": headers }),
                 Some(body),
             ),
             Event::Rpc { method, args } => (
-                "rpc",
                 json!({ "kind": "rpc", "method": method, "args": args }),
                 None,
             ),
             Event::Alarm { retry_count } => (
-                "alarm",
                 json!({ "kind": "alarm", "retryCount": retry_count }),
                 None,
             ),
-            Event::TestList => ("test", json!({ "kind": "test_list" }), None),
+            Event::TestList => (json!({ "kind": "test_list" }), None),
             Event::TestRun { file, name } => (
-                "test",
                 json!({ "kind": "test_run", "file": file, "name": name, "objectName": self.store.meta_req("name")? }),
                 None,
             ),
         };
-        let (r, cs) = self.run_in_txn(label, &checkin, json, body).await?;
+        let (r, cs) = self.run_in_txn(json, body).await?;
         let mut logs = std::mem::take(&mut self.pending_logs);
         if let Some(e) = self.engine.as_mut() {
             logs.extend(e.take_logs());

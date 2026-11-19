@@ -54,13 +54,6 @@ export const RESERVED: Table[] = [
     holds: 'the next alarm',
     detail: 'At most one row: when alarm() is due next. ctx.storage.setAlarm writes it.',
   },
-  {
-    name: '_perch_changes',
-    columns: 'id, at, event, checkin, changeset',
-    holds: 'a changeset per write',
-    detail:
-      'Every event that writes runs under a SQLite session; its changeset (data tables and _perch_kv) is stored here in the same transaction, with the check-in that produced it.',
-  },
 ];
 
 export interface Tool {
@@ -79,8 +72,6 @@ export const TOOLS: Tool[] = [
   { name: 'read_object', kind: 'read', does: 'A read of live or the preview: GET or HEAD to fetch() or public/, or an RPC method. The runtime refuses any write made during it and saves nothing.' },
   { name: 'import_files', kind: 'destructive', does: 'Imports a directory of static files from disk into public/ on the live object, as one check-in. Files stream from disk, so tens of thousands are fine and none pass through the agent.' },
   { name: 'run_tests', kind: 'read', does: 'Runs the object’s test/*.ts files. Each test gets its own fresh, empty copy of the object and a clock it controls.' },
-  { name: 'list_changes', kind: 'read', does: 'Recent data changes on live: the event, the time, rows per table, and whether each can be undone.' },
-  { name: 'undo_changes', kind: 'destructive', does: 'Reverses a data change and every newer one in one transaction. Refused across a migration. Recorded, so an undo can be undone.' },
   { name: 'release_change', kind: 'destructive', does: 'Runs the preview’s migrations on the live file and moves live to its code, squashed into one check-in, in one transaction. Refused if the preview did not build, a stored test fails, or live moved.' },
   { name: 'rollback_code', kind: 'destructive', does: 'Moves live back to an earlier check-in. Code only, never schema: refused when that code no longer fits the tables.' },
   { name: 'call_object', kind: 'destructive', does: 'A write call on the live object: POST, PUT, PATCH or DELETE to fetch(), or an RPC method.' },
@@ -101,8 +92,6 @@ export const COMMANDS: Command[] = [
   { usage: 'perch fetch <file> <path> [-X METHOD] [-d BODY]', does: 'Send one request to the live object’s fetch().' },
   { usage: 'perch import <file> <dir> [--into public/img/] [--prune]', does: 'Import a directory of static files into public/, streaming from disk. One check-in; unchanged files are skipped.' },
   { usage: 'perch test <file>', does: 'Run the stored tests, each on a fresh empty copy. Exit 1 on failure.' },
-  { usage: 'perch changes <file> [--limit 20]', does: 'Recent data changes.' },
-  { usage: 'perch undo <file> <id>', does: 'Reverse that data change and every newer one.' },
   { usage: 'perch export <file> <out> [--worker-name W]', does: 'Write the live code as a Wrangler project.' },
 ];
 
@@ -134,5 +123,6 @@ export const NOT_YET = [
   'npm imports (relative imports between the object’s own files work)',
   'a server mode hosting many object files',
   'sync between copies of a file',
+  'a history of data changes, or undo',
   'moving state to or from Cloudflare (export moves code and migrations, not data)',
 ];

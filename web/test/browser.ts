@@ -101,7 +101,7 @@ ok(top === 404, "requests from the site's own page still go to the network (/tod
 // ------------------------------------------------------------------ download, and back to native perch
 await page.click("details.panel summary");
 const facts = await page.$eval("#facts", (e) => e.textContent ?? "");
-ok(facts.includes("Todo") && /Recorded changes\d+/.test(facts), "the panel shows what is inside the file");
+ok(facts.includes("Todo") && /Check-ins\d+/.test(facts), "the panel shows what is inside the file");
 await page.click("#download");
 let saved = "";
 for (let i = 0; i < 50 && !saved; i++) {

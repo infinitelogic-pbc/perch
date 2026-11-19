@@ -13,14 +13,14 @@ const PROTOCOL_VERSIONS: &[&str] = &["2025-11-25", "2025-06-18", "2025-03-26", "
 
 pub const GUIDE: &str = r#"This server edits one portable durable object: a single SQLite file holding a Cloudflare-style Durable Object's code, history and data.
 
-Workflow: describe_object → read_code → propose_change (code + tests + migrations, applied to a preview copy, built there, stored tests run) → read_object and test_call (try reads and writes against the preview) → release_change (refused if tests fail; runs the migrations on the live file and moves the live check-in). rollback_code moves code back if it still fits the schema. undo_changes reverses recent data changes. read_object reads the live object (GET, getters) with writes refused by the runtime; call_object makes write calls on it.
+Workflow: describe_object → read_code → propose_change (code + tests + migrations, applied to a preview copy, built there, stored tests run) → read_object and test_call (try reads and writes against the preview) → release_change (refused if tests fail; runs the migrations on the live file and moves the live check-in). rollback_code moves code back if it still fits the schema. read_object reads the live object (GET, getters) with writes refused by the runtime; call_object makes write calls on it.
 
 Writing the object:
 - The entry file is src/index.ts. It exports the object's class (the name describe_object reports) extending DurableObject from "cloudflare:workers". Constructor signature is (ctx, env); call super(ctx, env).
 - Handlers: async fetch(request: Request): Promise<Response>; public methods are RPC (callable over HTTP as POST /.perch/rpc/<method> with a JSON array of args); async alarm() runs when ctx.storage.setAlarm(epochMs) comes due.
 - Storage: this.ctx.storage.sql.exec(sql, ...bindings) returns a cursor (.toArray(), .one(), .raw(), rowsWritten). this.ctx.storage.get/put/delete/list is the key-value half. ctx.storage.transactionSync(fn) for atomic multi-statement writes. Every event already runs in its own transaction.
 - Schema changes go ONLY in propose_change migrations (ordered, forward-only SQL). Object code cannot CREATE/ALTER/DROP, and cannot touch _perch_* tables.
-- Data tables need a declared PRIMARY KEY; use UUIDv7 TEXT keys (crypto.randomUUID() is v4; build v7 from Date.now() + crypto.getRandomValues) rather than INTEGER/AUTOINCREMENT so copies of the file can merge changesets later.
+- Data tables need a declared PRIMARY KEY; use UUIDv7 TEXT keys (crypto.randomUUID() is v4; build v7 from Date.now() + crypto.getRandomValues) rather than INTEGER/AUTOINCREMENT so two copies of the file never mint the same key.
 - Web pages: files under public/ are static and served before fetch() without waking the object (public/index.html at /, public/about.html at /about, public/docs/index.html at /docs/; /about.html redirects to /about; GET/HEAD only; ETag + 304). Unmatched requests go to fetch(). Binary files (images, fonts) are { "base64": "..." } in propose_change; for a folder of them, import_files reads straight from disk (tens of thousands of files are fine). Templates for dynamic pages can be imported as strings: import page from "./page.html" (also .txt .sql .css .md .svg). The same layout exports to Cloudflare Static Assets unchanged.
 - Editing: after the first version, change files with propose_change `edits` (exact old/new string replacement) instead of resending whole files.
 - Tests: put tests in test/*.ts. They run on every propose_change and release_change refuses while any fail. Each test gets a fresh, empty copy of the object:
@@ -34,7 +34,6 @@ Writing the object:
       expect(obj.sql("SELECT count(*) AS n FROM todos")[0].n).toBe(0);
     });
   obj has fetch(path, init), rpc(method, ...args), alarm(), sql(query, ...bindings) for seeding and assertions, storage, and clock.set/advance/now. expect has toBe, toEqual, toBeTruthy, toBeFalsy, toBeNull, toBeDefined, toContain, toHaveLength, toBeGreaterThan, toBeLessThan, toMatch, and .not. Write tests for the behavior the user asked for, so later changes cannot quietly break it.
-- Undo: every write is recorded. list_changes shows recent data changes; undo_changes reverses them (not across a migration).
 - Available globals: Request, Response, Headers, URL, URLSearchParams, TextEncoder/TextDecoder, crypto.randomUUID/getRandomValues, setTimeout, structuredClone, atob/btoa, console (logs come back in test_call). Not yet: outbound fetch, WebSockets, env bindings, npm imports (relative imports between files in the object work).
 - Keep the class Cloudflare-compatible: the same source deploys unchanged with `perch export` + wrangler."#;
 
@@ -171,24 +170,6 @@ fn tools_list() -> Value {
             "annotations": { "title": "Run stored tests", "readOnlyHint": true, "idempotentHint": true, "openWorldHint": false }
         },
         {
-            "name": "list_changes",
-            "title": "List data changes",
-            "description": "Recent data changes on the live object, newest first: which event made each (fetch, rpc, alarm, migration, undo), when, and rows inserted, updated and deleted per table. Shows which can be undone.",
-            "inputSchema": { "type": "object", "properties": {
-                "limit": { "type": "integer", "minimum": 1, "default": 20 }
-            } },
-            "annotations": { "title": "List data changes", "readOnlyHint": true, "idempotentHint": true, "openWorldHint": false }
-        },
-        {
-            "name": "undo_changes",
-            "title": "Undo data changes",
-            "description": "Reverse the live data change with this id and every newer one, in one transaction, restoring rows and KV values to what they were before. Refused across a migration. The undo is recorded as a change itself, so it can be undone.",
-            "inputSchema": { "type": "object", "properties": {
-                "back_to": { "type": "integer", "description": "id from list_changes; this change and all newer ones are reversed" }
-            }, "required": ["back_to"] },
-            "annotations": { "title": "Undo data changes", "readOnlyHint": false, "destructiveHint": true, "idempotentHint": false, "openWorldHint": false }
-        },
-        {
             "name": "release_change",
             "title": "Release change",
             "description": "Run the preview's migrations on the live file and move the live check-in to the preview's code, squashed into one check-in, in one transaction. Refused if the preview did not build or live moved since it was made.",
@@ -209,7 +190,7 @@ fn tools_list() -> Value {
         {
             "name": "call_object",
             "title": "Call object (live)",
-            "description": "Make a write call on the live object: a POST, PUT, PATCH or DELETE to the object's own fetch() handler, or one of its public RPC methods (the routes and methods are the ones read_code shows). Changes live data; list_changes and undo_changes can reverse it. For reads, use read_object.",
+            "description": "Make a write call on the live object: a POST, PUT, PATCH or DELETE to the object's own fetch() handler, or one of its public RPC methods (the routes and methods are the ones read_code shows). Changes live data. For reads, use read_object.",
             "inputSchema": write_schema(&["fetch", "rpc"], "fetch: an HTTP write to fetch(); rpc: a public method"),
             "annotations": { "title": "Call object (live)", "readOnlyHint": false, "destructiveHint": true, "idempotentHint": false, "openWorldHint": false }
         }
@@ -242,11 +223,6 @@ async fn call_tool(tools: &mut Tools, name: &str, args: Value) -> Result<Value> 
             tools.import_files(std::path::Path::new(&dir), s("into").as_deref(), s("message"), prune, &mut |_| {})
         }
         "run_tests" => tools.run_tests(s("target").as_deref()).await,
-        "list_changes" => tools.list_changes(args.get("limit").and_then(|v| v.as_u64()).unwrap_or(20) as usize),
-        "undo_changes" => {
-            let id = args.get("back_to").and_then(|v| v.as_i64()).ok_or_else(|| anyhow::anyhow!("back_to is required"))?;
-            tools.undo_changes(id)
-        }
         "release_change" => tools.release_change(s("message")).await,
         "rollback_code" => {
             let c = s("checkin").ok_or_else(|| anyhow::anyhow!("checkin is required"))?;

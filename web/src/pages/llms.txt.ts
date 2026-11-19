@@ -73,16 +73,16 @@ Workflow: describe_object, read_code, propose_change (code + tests +
 migrations on the preview; stored tests run), read_object and test_call
 (reads and writes on the preview), release_change (live; refused while a
 stored test fails). rollback_code moves code back if it still fits the
-schema. undo_changes reverses recent data changes. read_object reads live;
+schema. read_object reads live;
 call_object writes to it.
 
 ${TOOLS.map((t) => `- \`${t.name}\` [${t.kind}]: ${t.does}`).join('\n')}
 
 Annotations follow Anthropic's connector directory rules: every tool has a
 title and exactly one of readOnlyHint or destructiveHint. Read-only:
-describe_object, read_code, list_checkins, query_data, read_object, run_tests,
-list_changes. Destructive (anything that modifies data, the preview copy
-included): propose_change, test_call, undo_changes, release_change,
+describe_object, read_code, list_checkins, query_data, read_object, run_tests.
+Destructive (anything that modifies data, the preview copy
+included): propose_change, test_call, release_change,
 rollback_code, call_object, import_files.
 
 Reads and writes are separate tools. read_object takes GET or HEAD (or an RPC

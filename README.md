@@ -51,8 +51,6 @@ perch describe my.perch                    # tables, code, live check-in, next a
 perch checkins my.perch --diffs            # code history
 perch test my.perch                        # stored tests, each on a fresh empty copy
 perch import my.perch ./photos --into public/img/   # bulk import of static files
-perch changes my.perch                     # recent data changes
-perch undo my.perch <id>                   # reverse that change and every newer one
 perch export my.perch out/ && (cd out && bunx wrangler deploy)
 ```
 
@@ -68,7 +66,6 @@ perch export my.perch out/ && (cd out && bunx wrangler deploy)
 | `_perch_migrations` | ordered SQL migrations already applied, each tied to the check-in that introduced it |
 | `_perch_kv` | the key-value half of the storage API. Values are UTF-8 JSON that any runtime can read; what plain JSON cannot carry (Date, Map, Set, bytes, bigint, undefined, NaN) is tagged with `$perch` |
 | `_perch_alarms` | the next scheduled alarm and its retry count |
-| `_perch_changes` | a session-extension changeset for every event that wrote data (audit log, later undo and sync) |
 | everything else | the object's data, created and changed only by migrations |
 
 A SQLite authorizer enforces the boundary by mode. Object code (`ctx.storage.sql`)
@@ -89,9 +86,9 @@ alone carries the object.
 
 `perch run` loads the class at the live check-in into one V8 isolate and runs
 events one at a time. Each event (constructor, `fetch`, an RPC call, `alarm`)
-is one SQLite transaction with a session attached; its changeset goes into
-`_perch_changes` before commit. Writes made before a handler throws are kept, as
-on Cloudflare. When the live check-in moves (a release or rollback from another
+is one SQLite transaction. Writes made before a handler throws are kept, as
+on Cloudflare. Each call's result reports how many rows it inserted, updated
+and deleted per table; that count is computed for the call and not stored. When the live check-in moves (a release or rollback from another
 process), the next event rebuilds the isolate and reruns the constructor.
 
 | Capability | API | v0 |
@@ -116,7 +113,7 @@ Each event has a 30 s wall-clock limit.
 
 Files under `public/` are served as-is at the matching URL path, before
 `fetch()`, and without waking the object: a static file is a lookup in
-`_perch_blobs` with no constructor, no transaction and no changeset. A class
+`_perch_blobs` with no constructor and no transaction. A class
 that fails to load still serves its static files.
 
 The rules are Cloudflare Workers Static Assets' defaults, so a page behaves
@@ -191,8 +188,6 @@ result carries a short guide to writing an object.
 | `read_object` | readOnly | a read of live or the preview: GET/HEAD to fetch() or `public/`, or an RPC method. Enforced by the runtime: any SQL write, KV write or alarm change is refused and the transaction is rolled back |
 | `import_files` | destructive | imports a directory of static files from disk into `public/` on live, as one check-in; files stream, none pass through the agent |
 | `run_tests` | readOnly | runs `test/*.ts`, each test on its own fresh empty copy of the object |
-| `list_changes` | readOnly | recent data changes on live: event, time, rows per table, whether undoable |
-| `undo_changes` | destructive | reverses a data change and every newer one in one transaction; refused across a migration; recorded, so it can be undone |
 | `release_change` | destructive | runs the preview's migrations on live and moves the live check-in, squashed into one check-in, in one transaction; refused if the preview did not build, a stored test fails, or live moved |
 | `rollback_code` | destructive | moves the live check-in back; refused when that code's schema snapshot no longer fits (a table or column it knew is gone, or a new NOT NULL column has no default) |
 | `call_object` | destructive | a write call on the live object: POST/PUT/PATCH/DELETE to fetch(), or an RPC method |
@@ -202,7 +197,7 @@ Migrations only go forward; a rollback changes code, never schema.
 ## The harness is in the file
 
 There is no separate dev environment: the artifact is the workspace, the
-runtime is the sandbox, and the MCP tools are the harness. Three pieces make
+runtime is the sandbox, and the MCP tools are the harness. Two pieces make
 that efficient for agents and safe for people who never see the code.
 
 **Edits.** After the first version, `propose_change` takes
@@ -235,15 +230,6 @@ and `clock.set/advance/now`. `expect` has `toBe`, `toEqual`, `toBeTruthy`,
 `toBeGreaterThan`, `toBeLessThan`, `toMatch` and `.not`. `perch test my.perch`
 runs them from the shell (exit 1 on failure); `examples/todo/test` has seven.
 
-**Data undo.** Every event's changeset is already in `_perch_changes`.
-`list_changes` shows them; `undo_changes { back_to }` inverts that change and
-every newer one, newest first, in one transaction, restoring rows and KV
-values (alarms are not restored). It aborts untouched if a change no longer
-applies cleanly, is refused across a migration, and is recorded as a change
-itself, so an undo can be undone. A running `perch run` rebuilds its isolate on
-the next event so in-memory state matches. From the shell: `perch changes`,
-`perch undo my.perch <id>`.
-
 ## Claude connector directory rules
 
 The tool set follows Anthropic's
@@ -253,7 +239,7 @@ checked by the end-to-end suite:
 
 | Rule | How perch meets it |
 | --- | --- |
-| Every tool has a `title` and `readOnlyHint: true` or `destructiveHint: true` | All fourteen do, exactly one each. Seven are read-only; the seven that modify anything (including the preview copy) are destructive |
+| Every tool has a `title` and `readOnlyHint: true` or `destructiveHint: true` | All twelve do, exactly one each. Six are read-only; the six that modify anything (including the preview copy) are destructive |
 | No tool accepts both safe and unsafe HTTP methods | `read_object` takes only GET and HEAD; `test_call` and `call_object` take only POST, PUT, PATCH and DELETE, and each refuses the other's methods with the name of the right tool |
 | Read-only means read-only | `read_object` and `query_data` are enforced by the SQLite authorizer and the runtime, not by convention: writes error and nothing is saved |
 | Freeform tools name their target API | `query_data` and migrations link the SQLite docs; `propose_change` links the Cloudflare Durable Objects API; the call tools name the object's own `fetch()` routes and public methods |
@@ -304,8 +290,7 @@ JavaScript engine. Nothing is uploaded.
   evaluates the same `js/bootstrap.js` the native binary embeds, so
   `ctx.storage`, RPC rules and dispatch are the same code. It supplies the
   operations underneath: SQL, KV and alarms over the WebAssembly SQLite, with
-  the same authorizer sandbox, one transaction and one recorded changeset per
-  event.
+  the same authorizer sandbox and one transaction per event.
 - **Pages work as they are.** A service worker routes every request from the
   app's iframe to the object: `public/` files with the Cloudflare rules, then
   `fetch()`, and `POST /.perch/rpc/<method>`. Links, forms, `fetch` and images
@@ -313,7 +298,7 @@ JavaScript engine. Nothing is uploaded.
 - **Saving.** In Chrome and Edge a file opened with the picker or dropped on
   the page is written back in place after each change, once you allow it.
   Everywhere, Download gives you the file. A file changed in the browser opens
-  in native perch, which can undo those changes like any others.
+  in native perch.
 - **Limits.** One object per tab. Alarms fire only while the tab is open. No
   editing tools or MCP yet: it runs objects, it does not build them. Object
   code has no network, and the app's pages can load only from the object
@@ -340,9 +325,9 @@ do locally. Moving state in or out of Cloudflare is not in v0.
   breaking migration is refused, serves a copy of the file, and covers static
   files (every clean-URL case, 304s, HEAD, base64 images, serving while the
   constructor throws, the export's assets config), edits, the stored-test
-  release gate, data undo and redo, and the directory rules
+  release gate, and the directory rules
   below (annotations, read/write separation, enforced read-only calls), and bulk
-  import of static files (127 checks).
+  import of static files (121 checks).
 - `bun test/http-calls.ts <base>` runs the same 17 HTTP calls (API, RPC, alarm,
   static files, an imported template) against any host; it passes against
   `perch run` and against the `perch export` deploy on Cloudflare.
@@ -350,8 +335,7 @@ do locally. Moving state in or out of Cloudflare is not in v0.
 - `cd web && bun test/runtime.ts` runs the browser runtime under bun against
   native perch in both directions: native builds a file, the WebAssembly runtime
   serves it (static files, fetch, RPC, alarm, the sandbox), and native opens
-  what it saved, reads its KV values, undoes one of its changes and passes the
-  stored tests (34 checks).
+  what it saved, reads its KV values and passes the stored tests (32 checks).
 - `cd web && bun test/browser.ts` drives the real `/run` page in headless
   Chrome: the service worker, the app in its iframe, writes, download, and
   reopening from disk (23 checks). `bun test/smoke.ts <file.perch>` opens any
@@ -365,7 +349,8 @@ reads only the current version: there is no conversion of older files.
 ## Not yet
 
 WebSockets, bindings, a server mode hosting a directory of objects, sync
-between copies (the changesets are recorded for it), moving state to or from
+between copies, a history of data changes with undo (an earlier version
+recorded a changeset per write; it was removed as unused), moving state to or from
 Cloudflare, and a lease so only one copy is live. `perch run` and `perch mcp` on
 the same file each hold their own isolate; in-memory fields on the class are
 per process, and only `perch run` fires alarms. `perch` and `.perch` are working

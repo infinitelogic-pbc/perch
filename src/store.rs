@@ -163,13 +163,6 @@ CREATE TABLE _perch_alarms (
   scheduled_at INTEGER NOT NULL,
   retry_count INTEGER NOT NULL DEFAULT 0
 );
-CREATE TABLE _perch_changes (
-  id INTEGER PRIMARY KEY,
-  at INTEGER NOT NULL,
-  event TEXT NOT NULL,
-  checkin TEXT,
-  changeset BLOB NOT NULL
-);
 "#;
 
 pub type Manifest = BTreeMap<String, String>;
@@ -596,7 +589,7 @@ impl Store {
             let pk: Vec<&Column> = cols.iter().filter(|c| c.pk > 0).collect();
             if pk.is_empty() {
                 bail!(
-                    "table {table} has no declared PRIMARY KEY; data tables need one (UUIDv7 text recommended) so changesets from two copies never collide"
+                    "table {table} has no declared PRIMARY KEY; data tables need one (UUIDv7 text recommended)"
                 );
             }
             if pk.len() == 1 && pk[0].ty.eq_ignore_ascii_case("INTEGER") {

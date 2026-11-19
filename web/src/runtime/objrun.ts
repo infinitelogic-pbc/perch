@@ -239,42 +239,27 @@ export class ObjRuntime {
       this.mode = Mode.Privileged;
     }
     g.__perch.setModule(mod);
-    const out = await this.event("init", { kind: "init", className: this.className, name: this.name, env: {} });
+    const out = await this.event({ kind: "init", className: this.className, name: this.name, env: {} });
     if (!out.ok) throw new Error(`constructor failed: ${out.error}`);
   }
 
   // ------------------------------------------------------------ events
 
-  /** One event, one transaction, one recorded changeset. Events never overlap. */
-  private event(label: string, ev: any, body?: Uint8Array | null): Promise<Outcome> {
-    const run = this.chain.then(() => this.runEvent(label, ev, body));
+  /** One event, one transaction. Events never overlap. */
+  private event(ev: any, body?: Uint8Array | null): Promise<Outcome> {
+    const run = this.chain.then(() => this.runEvent(ev, body));
     this.chain = run.catch(() => {});
     return run;
   }
 
-  private async runEvent(label: string, ev: any, body?: Uint8Array | null): Promise<Outcome> {
-    const { capi, wasm, db } = this;
+  private async runEvent(ev: any, body?: Uint8Array | null): Promise<Outcome> {
+    const { capi, db } = this;
     const id = this.nextId++;
     const before = capi.sqlite3_total_changes(db.pointer);
     this.mode = Mode.Privileged;
     this.savepoint = 0;
     this.alarmTouched = false;
     db.exec("BEGIN");
-    // Record every data write of this event as a session changeset.
-    const pp = wasm.allocPtr();
-    let session = 0;
-    try {
-      db.checkRc(capi.sqlite3session_create(db.pointer, "main", pp));
-      session = wasm.peekPtr(pp);
-    } finally {
-      wasm.dealloc(pp);
-    }
-    capi.sqlite3session_table_filter(session, (_c: any, t: any) => {
-      const name = typeof t === "number" ? wasm.cstrToJs(t) : String(t);
-      return !name.startsWith("_perch_") || name === "_perch_kv" ? 1 : 0;
-    }, 0);
-    capi.sqlite3session_attach(session, null);
-
     let out: Outcome;
     try {
       if (body && body.length) this.bodies.set(id, body);
@@ -298,21 +283,6 @@ export class ObjRuntime {
       while (this.savepoint > 0) {
         const n = this.savepoint--;
         db.exec(`ROLLBACK TO perch_tx_${n}; RELEASE perch_tx_${n}`);
-      }
-      const pn = wasm.alloc(4), pc = wasm.allocPtr();
-      let cs = EMPTY;
-      try {
-        db.checkRc(capi.sqlite3session_changeset(session, pn, pc));
-        const n = wasm.peek32(pn), p = wasm.peekPtr(pc);
-        if (n > 0) cs = wasm.heap8u().slice(Number(p), Number(p) + n);
-        if (p) capi.sqlite3_free(p);
-      } finally {
-        wasm.dealloc(pn);
-        wasm.dealloc(pc);
-        capi.sqlite3session_delete(session);
-      }
-      if (cs.length) {
-        db.exec({ sql: "INSERT INTO _perch_changes(at, event, checkin, changeset) VALUES (?, ?, ?, ?)", bind: [Date.now(), label, this.checkin, cs] });
       }
       // Writes made before a handler throws are kept, as on Cloudflare.
       db.exec("COMMIT");
@@ -375,14 +345,14 @@ export class ObjRuntime {
       return "error" in r ? this.json(500, { error: r.error }) : this.json(200, { result: r.result });
     }
     if (this.loadError) return this.text(500, `${this.loadError}\n`);
-    const out = await this.event("fetch", { kind: "fetch", method: req.method, url: req.url, headers: req.headers }, req.body);
+    const out = await this.event({ kind: "fetch", method: req.method, url: req.url, headers: req.headers }, req.body);
     if (!out.ok) return this.text(500, `object threw: ${out.error}\n`);
     return { status: out.meta.status ?? 200, headers: out.meta.headers ?? [], body: out.body };
   }
 
   async rpc(method: string, args: unknown[]): Promise<{ result: unknown } | { error: string }> {
     if (this.loadError) return { error: this.loadError };
-    const out = await this.event("rpc", { kind: "rpc", method, args });
+    const out = await this.event({ kind: "rpc", method, args });
     return out.ok ? { result: out.meta.result ?? null } : { error: out.error };
   }
 
@@ -392,7 +362,7 @@ export class ObjRuntime {
     const row = this.priv(() => this.db.selectArray("SELECT scheduled_at, retry_count FROM _perch_alarms WHERE id = 1"));
     if (!row || Number(row[0]) > Date.now()) return false;
     const [at, retry] = [Number(row[0]), Number(row[1])];
-    const out = await this.event("alarm", { kind: "alarm", retryCount: retry });
+    const out = await this.event({ kind: "alarm", retryCount: retry });
     const touched = this.alarmTouched;
     const missing = out.ok && out.meta.missing === true;
     this.priv(() => {
@@ -432,7 +402,6 @@ export class ObjRuntime {
         files: paths.filter((p) => !p.startsWith(PUBLIC_DIR)),
         public: paths.filter((p) => p.startsWith(PUBLIC_DIR)),
         kvKeys: Number(this.db.selectValue("SELECT count(*) FROM _perch_kv")),
-        changesets: Number(this.db.selectValue("SELECT count(*) FROM _perch_changes")),
         checkins: Number(this.db.selectValue("SELECT count(*) FROM _perch_checkins")),
         nextAlarm: alarm == null ? null : Number(alarm),
         loadError: this.loadError,

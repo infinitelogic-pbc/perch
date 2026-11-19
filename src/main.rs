@@ -106,14 +106,6 @@ enum Cmd {
         #[arg(short, long)]
         message: Option<String>,
     },
-    /// List recent data changes on the live object
-    Changes {
-        file: PathBuf,
-        #[arg(long, default_value_t = 20)]
-        limit: usize,
-    },
-    /// Reverse the data change with this id and every newer one
-    Undo { file: PathBuf, back_to: i64 },
 }
 
 fn pascal(s: &str) -> String {
@@ -252,8 +244,6 @@ fn main() -> Result<()> {
             eprintln!();
             print(&v);
         }
-        Cmd::Changes { file, limit } => print(&Tools::new(file)?.list_changes(limit)?),
-        Cmd::Undo { file, back_to } => print(&Tools::new(file)?.undo_changes(back_to)?),
         Cmd::Export { file, out, worker_name } => {
             let warnings = export::export(&file, &out, worker_name.as_deref())?;
             print(&json!({ "exported": out.display().to_string(), "warnings": warnings, "next": format!("cd {} && bunx wrangler deploy", out.display()) }));

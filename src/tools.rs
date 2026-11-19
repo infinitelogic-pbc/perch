@@ -5,13 +5,12 @@ use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Result, anyhow, bail};
-use rusqlite::session::Session;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::engine::exec_sql;
 use crate::host::{Event, Host, Outcome};
-use crate::store::{Files, Manifest, Migration, Mode, PUBLIC_DIR, Store, now_ms, schema_fits};
+use crate::store::{Files, Manifest, Migration, Mode, PUBLIC_DIR, Store, schema_fits};
 
 pub struct Tools {
     pub path: PathBuf,
@@ -134,7 +133,7 @@ fn iso(ms: i64) -> String {
 }
 
 /// Write a file list + migrations as a new check-in and make it live in `store`,
-/// all in one transaction. Migration data changes are recorded as a changeset.
+/// all in one transaction.
 fn commit_checkin(
     store: &Store,
     parent: Option<&str>,
@@ -147,22 +146,7 @@ fn commit_checkin(
         // `build` stores any new blobs and returns the check-in's file list.
         let manifest = build(store)?;
         let id = store.insert_checkin(parent, &manifest, message)?;
-        let conn = store.conn.clone();
-        let mut session = Session::new(&conn)?;
-        session.table_filter(Some(|t: &str| !t.starts_with("_perch_") || t == "_perch_kv"));
-        session.attach::<&str>(None)?;
         let warnings = store.apply_migrations(migrations, &id)?;
-        let mut cs = Vec::new();
-        session.changeset_strm(&mut cs)?;
-        drop(session);
-        if !cs.is_empty() {
-            store.with_mode(Mode::Privileged, |c| {
-                c.execute(
-                    "INSERT INTO _perch_changes(at, event, checkin, changeset) VALUES (?, 'migration', ?, ?)",
-                    rusqlite::params![now_ms(), id, cs],
-                )
-            })?;
-        }
         store.snapshot_schema(&id)?;
         store.set_meta("live_checkin", &id)?;
         Ok::<_, anyhow::Error>((id, warnings))
@@ -286,9 +270,6 @@ impl Tools {
         let kv_keys: i64 = s.with_mode(Mode::Privileged, |c| {
             c.query_row("SELECT count(*) FROM _perch_kv", [], |r| r.get(0))
         })?;
-        let changes: i64 = s.with_mode(Mode::Privileged, |c| {
-            c.query_row("SELECT count(*) FROM _perch_changes", [], |r| r.get(0))
-        })?;
         let file_bytes = std::fs::metadata(&s.path).map(|m| m.len()).unwrap_or(0);
         Ok(json!({
             "name": s.meta_req("name")?,
@@ -306,7 +287,6 @@ impl Tools {
             "public": { "files": public_n, "bytes": public_bytes, "first": public_sample },
             "migrations_applied": s.migrations()?.len(),
             "next_alarm": alarm_json(alarm),
-            "recorded_changesets": changes,
             "preview": if is_preview {
                 json!({ "base": s.meta("preview_base")?, "built": s.meta("preview_built")?.as_deref() == Some(live.as_str()) })
             } else {
@@ -962,117 +942,6 @@ impl Tools {
         }
     }
 
-    // ------------------------------------------------------------ data undo
-
-    fn change_rows(s: &Store, where_sql: &str, arg: i64) -> Result<Vec<(i64, i64, String, Option<String>, Vec<u8>)>> {
-        s.with_mode(Mode::Privileged, |c| {
-            let mut st = c.prepare(&format!(
-                "SELECT id, at, event, checkin, changeset FROM _perch_changes {where_sql} ORDER BY id DESC"
-            ))?;
-            let v = st
-                .query_map([arg], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))?
-                .collect::<rusqlite::Result<Vec<_>>>();
-            v
-        })
-        .map_err(Into::into)
-    }
-
-    fn last_migration_at(s: &Store) -> Result<i64> {
-        Ok(s.with_mode(Mode::Privileged, |c| {
-            c.query_row("SELECT coalesce(max(applied_at), 0) FROM _perch_migrations", [], |r| r.get(0))
-        })?)
-    }
-
-    /// Recent data changes on the live object, newest first.
-    pub fn list_changes(&self, limit: usize) -> Result<Value> {
-        let s = self.store()?;
-        let rows = Self::change_rows(&s, "WHERE id > ?", -1)?;
-        let mig_at = Self::last_migration_at(&s)?;
-        let mut undoable = true;
-        let mut out = vec![];
-        for (id, at, event, checkin, cs) in rows.iter().take(limit) {
-            if event == "migration" || *at <= mig_at {
-                undoable = false;
-            }
-            out.push(json!({
-                "id": id,
-                "at": iso(*at),
-                "event": event,
-                "checkin": checkin.as_deref().map(|c| &c[..c.len().min(12)]),
-                "tables": crate::host::summarize_changeset(cs),
-                "undoable": undoable,
-            }));
-        }
-        Ok(json!({
-            "changes": out,
-            "total": rows.len(),
-            "note": "undo_changes { back_to: id } reverses that change and every newer one. Changes at or before the last migration cannot be undone.",
-        }))
-    }
-
-    /// Reverse every recorded data change with id >= `back_to`, newest first,
-    /// in one transaction. The undo is itself recorded, so it can be undone.
-    pub fn undo_changes(&mut self, back_to: i64) -> Result<Value> {
-        use rusqlite::session::{ConflictAction, invert_strm};
-        use std::io::Read;
-        let s = self.store()?;
-        let rows = Self::change_rows(&s, "WHERE id >= ?", back_to)?;
-        if rows.is_empty() || rows.last().map(|r| r.0) != Some(back_to) {
-            bail!("no recorded change with id {back_to}; list_changes shows the ids");
-        }
-        let mig_at = Self::last_migration_at(&s)?;
-        if let Some(r) = rows.iter().find(|r| r.2 == "migration" || r.1 <= mig_at) {
-            bail!(
-                "refusing: change {} is at or before a migration, and schema changes only go forward. The oldest change that can be undone is newer than {}.",
-                r.0, iso(mig_at)
-            );
-        }
-        self.live = None;
-        s.with_mode(Mode::Privileged, |c| c.execute_batch("BEGIN IMMEDIATE; PRAGMA defer_foreign_keys = ON;"))?;
-        let r = (|| {
-            let conn = s.conn.clone();
-            let mut session = Session::new(&conn)?;
-            session.table_filter(Some(|t: &str| !t.starts_with("_perch_") || t == "_perch_kv"));
-            session.attach::<&str>(None)?;
-            for (id, _, _, _, cs) in &rows {
-                let mut inverted = Vec::new();
-                let mut src: &[u8] = cs;
-                invert_strm(&mut src as &mut dyn Read, &mut inverted)?;
-                let mut inv: &[u8] = &inverted;
-                conn.apply_strm(
-                    &mut inv as &mut dyn Read,
-                    None::<fn(&str) -> bool>,
-                    |_kind, _item| ConflictAction::SQLITE_CHANGESET_ABORT,
-                )
-                .map_err(|e| anyhow!("change {id} no longer applies cleanly ({e}); nothing was undone"))?;
-            }
-            let mut cs = Vec::new();
-            session.changeset_strm(&mut cs)?;
-            drop(session);
-            conn.execute(
-                "INSERT INTO _perch_changes(at, event, checkin, changeset) VALUES (?, 'undo', ?, ?)",
-                rusqlite::params![now_ms(), s.live_checkin()?, cs],
-            )?;
-            let new_id = conn.last_insert_rowid();
-            s.set_meta("data_epoch", &now_ms().to_string())?;
-            Ok::<_, anyhow::Error>((new_id, cs))
-        })();
-        match r {
-            Ok((new_id, cs)) => {
-                s.with_mode(Mode::Privileged, |c| c.execute_batch("COMMIT; PRAGMA wal_checkpoint(PASSIVE);"))?;
-                Ok(json!({
-                    "undone": rows.iter().map(|r| r.0).collect::<Vec<_>>(),
-                    "tables": crate::host::summarize_changeset(&cs),
-                    "recorded_as": new_id,
-                    "note": "data and KV are restored; alarms are not. Undo this undo with undo_changes { back_to: recorded_as }.",
-                }))
-            }
-            Err(e) => {
-                let _ = s.with_mode(Mode::Privileged, |c| c.execute_batch("ROLLBACK"));
-                Err(e)
-            }
-        }
-    }
 }
 
 const NOTHING_TO_IMPORT: &str = "nothing to import";

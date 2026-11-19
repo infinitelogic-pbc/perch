@@ -92,8 +92,7 @@ const calls = [
         <h2>Open the file, run the class.</h2>
         <p>
           The <code>perch</code> binary loads the live check-in’s code into V8 and runs it single-threaded,
-          one event per SQLite transaction. Every write is recorded as a session changeset in the
-          same transaction. The class is an ordinary Durable Object: it extends
+          one event per SQLite transaction. The class is an ordinary Durable Object: it extends
           <code>DurableObject</code> from <code>cloudflare:workers</code>.
         </p>
         <p>

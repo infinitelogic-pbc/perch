@@ -74,12 +74,12 @@ const init = await mcp.rpc("initialize", { protocolVersion: "2025-06-18", capabi
 ok(init.result.instructions.includes("propose_change"), "initialize returns the agent guide");
 const list = await mcp.rpc("tools/list");
 const names = list.result.tools.map((t: any) => t.name);
-ok(names.length === 14, `fourteen tools (${names.join(", ")})`);
+ok(names.length === 12, `twelve tools (${names.join(", ")})`);
 ok(list.result.tools.every((t: any) => t.title && t.annotations), "every tool has a title and annotations");
 const ann = Object.fromEntries(list.result.tools.map((t: any) => [t.name, t.annotations]));
 ok(list.result.tools.every((t: any) => (t.annotations.readOnlyHint === true) !== (t.annotations.destructiveHint === true)), "every tool is exactly one of readOnlyHint or destructiveHint");
-const READS = ["describe_object", "read_code", "list_checkins", "query_data", "read_object", "run_tests", "list_changes"];
-ok(names.every((n: string) => READS.includes(n) === (ann[n].readOnlyHint === true)) && names.every((n: string) => n.length <= 64), "the read-only set is the seven read tools; names are within 64 characters");
+const READS = ["describe_object", "read_code", "list_checkins", "query_data", "read_object", "run_tests"];
+ok(names.every((n: string) => READS.includes(n) === (ann[n].readOnlyHint === true)) && names.every((n: string) => n.length <= 64), "the read-only set is the six read tools; names are within 64 characters");
 const props = (n: string) => list.result.tools.find((t: any) => t.name === n).inputSchema.properties;
 ok(!props("call_object").http_method.enum.includes("GET") && !props("test_call").http_method.enum.includes("GET") && props("read_object").http_method.enum.join() === "GET,HEAD", "no tool accepts both safe and unsafe HTTP methods");
 
@@ -385,33 +385,15 @@ ok(r.v.ok && r.v.passed === 8 && r.v.target === "live", "run_tests on live");
 r = await m3.tool("query_data", { sql: "SELECT count(*) FROM todos" });
 ok(r.v.rows[0][0] === 0, "tests ran on scratch copies: live has no rows");
 
-// Data undo.
-await m3.tool("call_object", { kind: "rpc", method: "add", args: ["keep me"] });
-await m3.tool("call_object", { kind: "rpc", method: "add", args: ["agent mistake"] });
-await m3.tool("call_object", { kind: "rpc", method: "setRetention", args: [5] });
-r = await m3.tool("list_changes", {});
-const ch = r.v.changes;
-ok(ch.length >= 3 && ch[0].event === "rpc" && ch[0].tables._perch_kv && ch[1].tables.todos.inserts === 1 && ch.every((c: any) => c.undoable), "list_changes shows events with rows per table");
-const firstAdd = ch[2].id;
-r = await m3.tool("undo_changes", { back_to: ch[1].id });
-ok(!r.isError && r.v.undone.length === 2 && r.v.tables.todos.deletes === 1, "undo_changes reverses the two newest changes");
-r = await m3.tool("query_data", { sql: "SELECT title FROM todos" });
-ok(r.v.rows.length === 1 && r.v.rows[0][0] === "keep me", "the mistaken row is gone, the earlier one stays");
-const redo = (await m3.tool("list_changes", {})).v.changes[0];
-ok(redo.event === "undo", "the undo is recorded as a change");
-r = await m3.tool("undo_changes", { back_to: redo.id });
-r = await m3.tool("query_data", { sql: "SELECT count(*) FROM todos" });
-ok(r.v.rows[0][0] === 2, "undoing the undo brings the row back");
-r = await m3.tool("call_object", { kind: "rpc", method: "stats" });
-ok(r.v.result.total === 2, "the live object sees the restored data");
+// Two rows on live, and a migration released over them.
+r = await m3.tool("call_object", { kind: "rpc", method: "add", args: ["first"] });
+ok(r.v.changes.todos?.inserts === 1, "a write call reports the rows it changed");
+await m3.tool("call_object", { kind: "rpc", method: "add", args: ["second"] });
 r = await m3.tool("propose_change", { message: "add notes", migrations: [{ name: "0002_note", sql: "ALTER TABLE todos ADD COLUMN note TEXT" }] });
 r = await m3.tool("release_change", {});
 ok(!r.isError, "release a migration");
-r = await m3.tool("undo_changes", { back_to: firstAdd });
-ok(r.isError && r.text.includes("migration"), "undo is refused across a migration");
 
 // Reads and writes are separate tools, and the read is enforced by the runtime.
-const before = (await m3.tool("list_changes", {})).v.total;
 r = await m3.tool("read_object", { kind: "rpc", method: "stats" });
 ok(r.v.ok && r.v.result.total === 2 && r.v.read_only, "read_object calls a getter");
 r = await m3.tool("read_object", { kind: "fetch", path: "/todos?done=0" });
@@ -423,7 +405,7 @@ ok(r.isError && r.v.error.includes("read-only"), "a key-value write during read_
 r = await m3.tool("read_object", { kind: "rpc", method: "scheduleCleanup", args: [1] });
 ok(r.isError && r.v.error.includes("read-only"), "an alarm change during read_object is refused");
 r = await m3.tool("query_data", { sql: "SELECT count(*) FROM todos" });
-ok(r.v.rows[0][0] === 2 && (await m3.tool("list_changes", {})).v.total === before, "nothing was written or recorded by the refused reads");
+ok(r.v.rows[0][0] === 2 && sh(["describe", gate]).kv_keys === 0, "nothing was written by the refused reads");
 r = await m3.tool("read_object", { kind: "fetch", path: "/todos", http_method: "POST" });
 ok(r.isError && r.text.includes("call_object"), "read_object refuses POST");
 r = await m3.tool("call_object", { kind: "fetch", path: "/todos", http_method: "GET" });
