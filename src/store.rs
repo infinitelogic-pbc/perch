@@ -208,6 +208,16 @@ pub struct Migration {
     pub sql: String,
 }
 
+/// What a directory import did.
+#[derive(Serialize, Default, Debug, Clone)]
+pub struct ImportStats {
+    pub added: usize,
+    pub replaced: usize,
+    pub unchanged: usize,
+    pub removed: usize,
+    pub bytes: u64,
+}
+
 pub struct Store {
     pub conn: Rc<Connection>,
     pub mode: ModeCell,
@@ -265,6 +275,20 @@ impl Store {
         migrations: &[Migration],
         message: &str,
     ) -> Result<Store> {
+        Self::create_with(path, name, class, files, migrations, message, |_, _| Ok(()))
+    }
+
+    /// As [`create`](Self::create), with `extra` adding more files to the first
+    /// check-in inside the same transaction (a streamed `public/` directory).
+    pub fn create_with(
+        path: &Path,
+        name: &str,
+        class: &str,
+        files: &Files,
+        migrations: &[Migration],
+        message: &str,
+        extra: impl FnOnce(&Store, &mut Manifest) -> Result<()>,
+    ) -> Result<Store> {
         if path.exists() {
             bail!("{} already exists", path.display());
         }
@@ -278,7 +302,8 @@ impl Store {
         s.set_meta("created_at", &now_ms().to_string())?;
         s.conn.execute_batch("BEGIN IMMEDIATE")?;
         let r = (|| {
-            let manifest = s.put_files(files)?;
+            let mut manifest = s.put_files(files)?;
+            extra(&s, &mut manifest)?;
             let id = s.insert_checkin(None, &manifest, message)?;
             s.apply_migrations(migrations, &id)?;
             s.snapshot_schema(&id)?;
@@ -448,21 +473,88 @@ impl Store {
         self.meta_req("live_checkin")
     }
 
-    /// Every file at a check-in, as bytes (code is UTF-8; `public/` may be binary).
-    pub fn files_at(&self, checkin: &str) -> Result<Files> {
-        let ck = self.checkin(checkin)?;
+    /// The file list at a check-in (path -> blob hash). Never loads contents.
+    pub fn manifest_at(&self, checkin: &str) -> Result<Manifest> {
+        Ok(self.checkin(checkin)?.manifest)
+    }
+
+    /// The files code can import or test at a check-in: everything except
+    /// `public/`. Static files are never loaded to run code; an object may
+    /// hold tens of thousands of them.
+    pub fn code_files_at(&self, checkin: &str) -> Result<Files> {
         let mut out = BTreeMap::new();
-        for (path, hash) in ck.manifest {
-            out.insert(path, self.blob(&hash)?);
+        for (path, hash) in self.checkin(checkin)?.manifest {
+            if !path.starts_with(PUBLIC_DIR) {
+                out.insert(path, self.blob(&hash)?);
+            }
         }
         Ok(out)
     }
 
-    /// The live check-in's manifest (path -> blob hash).
-    pub fn live_manifest(&self) -> Result<(String, Manifest)> {
-        let id = self.live_checkin()?;
-        let ck = self.checkin(&id)?;
-        Ok((id, ck.manifest))
+    /// A blob's size in bytes, without reading it.
+    pub fn blob_size(&self, hash: &str) -> Result<u64> {
+        let n: Option<i64> = self.with_mode(Mode::Privileged, |c| {
+            c.query_row("SELECT size FROM _perch_blobs WHERE hash=?", [hash], |r| r.get(0)).optional()
+        })?;
+        Ok(n.unwrap_or(0) as u64)
+    }
+
+    /// Stream a directory tree into the blob table and `manifest`, one file in
+    /// memory at a time. `into` is the manifest prefix (ending in `/`). With
+    /// `prune`, manifest entries under `into` that the directory lacks are
+    /// removed. The caller owns the transaction and the check-in.
+    pub fn import_dir(
+        &self,
+        dir: &Path,
+        into: &str,
+        manifest: &mut Manifest,
+        prune: bool,
+        progress: &mut dyn FnMut(usize),
+    ) -> Result<ImportStats> {
+        let mut stats = ImportStats::default();
+        let mut seen = std::collections::HashSet::new();
+        let mut stack = vec![dir.to_path_buf()];
+        while let Some(d) = stack.pop() {
+            let mut entries: Vec<PathBuf> = std::fs::read_dir(&d)
+                .with_context(|| format!("reading {}", d.display()))?
+                .filter_map(|e| e.ok().map(|e| e.path()))
+                .collect();
+            entries.sort();
+            for p in entries {
+                let name = p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+                if name.starts_with('.') {
+                    continue; // .DS_Store, dotfiles
+                }
+                if p.is_dir() {
+                    stack.push(p);
+                    continue;
+                }
+                let rel = p.strip_prefix(dir)?.to_string_lossy().replace('\\', "/");
+                let path = format!("{into}{rel}");
+                validate_path(&path)?;
+                let bytes = std::fs::read(&p).with_context(|| format!("reading {}", p.display()))?;
+                if bytes.len() > MAX_FILE_BYTES {
+                    bail!("{} is {} bytes; files are limited to 25 MiB (Cloudflare's per-asset limit)", p.display(), bytes.len());
+                }
+                let hash = self.put_blob(&bytes)?;
+                stats.bytes += bytes.len() as u64;
+                match manifest.insert(path.clone(), hash.clone()) {
+                    None => stats.added += 1,
+                    Some(old) if old == hash => stats.unchanged += 1,
+                    Some(_) => stats.replaced += 1,
+                }
+                seen.insert(path);
+                progress(seen.len());
+            }
+        }
+        if prune {
+            let gone: Vec<String> = manifest.keys().filter(|k| k.starts_with(into) && !seen.contains(*k)).cloned().collect();
+            for k in gone {
+                manifest.remove(&k);
+                stats.removed += 1;
+            }
+        }
+        Ok(stats)
     }
 
     pub fn migrations(&self) -> Result<Vec<(i64, String, String, String, i64)>> {

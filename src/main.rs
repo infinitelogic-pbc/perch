@@ -92,6 +92,20 @@ enum Cmd {
     },
     /// Run the object's stored tests (test/*.ts), each on a fresh empty copy
     Test { file: PathBuf },
+    /// Import a directory of static files into the object's public/ tree
+    Import {
+        file: PathBuf,
+        /// Directory to read (recursively)
+        dir: PathBuf,
+        /// Where the files go, e.g. public/img/ (default public/)
+        #[arg(long)]
+        into: Option<String>,
+        /// Also remove files under --into that the directory does not have
+        #[arg(long)]
+        prune: bool,
+        #[arg(short, long)]
+        message: Option<String>,
+    },
     /// List recent data changes on the live object
     Changes {
         file: PathBuf,
@@ -121,6 +135,15 @@ export class {class} extends DurableObject {{}}
     )
 }
 
+/// A progress line on stderr for long imports, every thousand files.
+fn progress(label: &'static str) -> impl FnMut(usize) {
+    move |n| {
+        if n % 1000 == 0 {
+            eprint!("\r{label}: {n} files");
+        }
+    }
+}
+
 fn print(v: &Value) {
     println!("{}", serde_json::to_string_pretty(v).unwrap());
 }
@@ -142,18 +165,20 @@ fn main() -> Result<()> {
             });
             let mut files = BTreeMap::new();
             let mut migrations = vec![];
+            let mut public_dir: Option<PathBuf> = None;
             let msg;
             if let Some(dir) = from {
                 let src = dir.join("src");
                 if !src.is_dir() {
                     bail!("{} has no src/ directory", dir.display());
                 }
-                for sub in tools::OBJECT_DIRS {
+                for sub in tools::CODE_DIRS {
                     let d = dir.join(sub);
                     if d.is_dir() {
                         tools::read_dir_bytes(&dir, &d, &mut files)?;
                     }
                 }
+                public_dir = Some(dir.join("public")).filter(|p| p.is_dir());
                 let mdir = dir.join("migrations");
                 if mdir.is_dir() {
                     let mut entries: Vec<_> = std::fs::read_dir(&mdir)?.filter_map(|e| e.ok()).map(|e| e.path()).filter(|p| p.extension().is_some_and(|x| x == "sql")).collect();
@@ -170,13 +195,21 @@ fn main() -> Result<()> {
                 files.insert("src/index.ts".to_string(), starter(&class).into_bytes());
                 msg = "new object".to_string();
             }
-            let s = Store::create(&file, &name, &class, &files, &migrations, &msg)?;
+            // Static files stream from disk one at a time; only code is held in memory.
+            let mut public_stats = store::ImportStats::default();
+            let s = Store::create_with(&file, &name, &class, &files, &migrations, &msg, |st, manifest| {
+                if let Some(p) = &public_dir {
+                    public_stats = st.import_dir(p, store::PUBLIC_DIR, manifest, false, &mut progress("importing public/"))?;
+                }
+                Ok(())
+            })?;
             print(&json!({
                 "created": file.display().to_string(),
                 "name": name,
                 "class": class,
                 "checkin": s.live_checkin()?,
                 "files": files.keys().collect::<Vec<_>>(),
+                "public_files": public_stats.added,
                 "migrations": migrations.iter().map(|m| &m.name).collect::<Vec<_>>(),
             }));
         }
@@ -214,11 +247,16 @@ fn main() -> Result<()> {
             }
             Ok(())
         })?,
+        Cmd::Import { file, dir, into, prune, message } => {
+            let v = Tools::new(file)?.import_files(&dir, into.as_deref(), message, prune, &mut progress("importing"))?;
+            eprintln!();
+            print(&v);
+        }
         Cmd::Changes { file, limit } => print(&Tools::new(file)?.list_changes(limit)?),
         Cmd::Undo { file, back_to } => print(&Tools::new(file)?.undo_changes(back_to)?),
         Cmd::Export { file, out, worker_name } => {
-            export::export(&file, &out, worker_name.as_deref())?;
-            print(&json!({ "exported": out.display().to_string(), "next": format!("cd {} && bunx wrangler deploy", out.display()) }));
+            let warnings = export::export(&file, &out, worker_name.as_deref())?;
+            print(&json!({ "exported": out.display().to_string(), "warnings": warnings, "next": format!("cd {} && bunx wrangler deploy", out.display()) }));
         }
     }
     Ok(())

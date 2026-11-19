@@ -57,6 +57,12 @@ ${RUNTIME.map((r) => `- ${r.api}: ${r.note}`).join('\n')}
 - Templates import as strings: \`import page from "./page.html"\` (also .txt,
   .sql, .css, .md, .svg). Binary files go through propose_change as
   \`{ "base64": "..." }\`; 25 MiB per file.
+- Many static files: \`perch import <file> <dir> --into public/img/\` (or the
+  import_files tool, given a directory path) streams a directory from disk into
+  public/ as one check-in on live. Tens of thousands of files are fine. Running
+  the class never loads them, and listings count them instead of naming them.
+  Cloudflare allows 20,000 static files per Worker version on Free and 100,000
+  on Paid; export warns above either.
 - \`POST /.perch/rpc/<method>\` with a JSON array body calls a public method and
   returns \`{"result": ...}\`. constructor, fetch, alarm, ctx, env and
   names starting with \`_\` are not RPC.
@@ -77,7 +83,7 @@ title and exactly one of readOnlyHint or destructiveHint. Read-only:
 describe_object, read_code, list_checkins, query_data, read_object, run_tests,
 list_changes. Destructive (anything that modifies data, the preview copy
 included): propose_change, test_call, undo_changes, release_change,
-rollback_code, call_object.
+rollback_code, call_object, import_files.
 
 Reads and writes are separate tools. read_object takes GET or HEAD (or an RPC
 method) on live or the preview, and the runtime refuses any SQL write,

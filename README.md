@@ -50,6 +50,7 @@ perch fetch my.perch /path                 # one request to fetch()
 perch describe my.perch                    # tables, code, live check-in, next alarm
 perch checkins my.perch --diffs            # code history
 perch test my.perch                        # stored tests, each on a fresh empty copy
+perch import my.perch ./photos --into public/img/   # bulk import of static files
 perch changes my.perch                     # recent data changes
 perch undo my.perch <id>                   # reverse that change and every newer one
 perch export my.perch out/ && (cd out && bunx wrangler deploy)
@@ -140,6 +141,39 @@ to 25 MiB each, Cloudflare's per-asset limit. Dynamic pages render in `fetch()`,
 usually from an imported template (`examples/todo` serves its UI from
 `public/` and renders `/stats` from `src/stats.html`).
 
+### Many static files
+
+An object can hold tens of thousands of static files. `perch import` brings a
+directory in from disk:
+
+```sh
+perch import my.perch ./photos --into public/img/           # add or replace
+perch import my.perch ./photos --into public/img/ --prune   # and remove what the directory lacks
+```
+
+- **Streaming.** Files go from disk into the object one at a time, so memory
+  stays flat: 41,000 files import in 2 seconds, and 1 GB of 1 MB files in 6
+  seconds at 18 MB of memory.
+- **One check-in, straight to live.** Static files cannot change what the class
+  does, so an import needs no preview. It is refused while a preview is
+  unreleased, because it moves the live check-in.
+- **Repeatable.** Files already present with the same contents are skipped, and
+  an import that changes nothing records nothing.
+- **For agents.** The `import_files` tool takes a directory path on the same
+  machine, so no file passes through the conversation.
+- **Cheap to carry.** Running the class never loads static files, `perch run`
+  keeps an in-memory index of them (about 0.1 ms per request), and
+  `describe_object`, `read_code` and `list_checkins` count them instead of
+  listing them.
+- **On Cloudflare.** Workers Static Assets allows 20,000 files per Worker
+  version on the Free plan and 100,000 on Paid. `perch export` warns when
+  `public/` is over either. Above 100,000, serve the files from R2.
+
+Still to do for very large objects: a preview is a full copy of the file, and
+each check-in stores the whole file list again, so code changes on a
+multi-gigabyte object are slow and grow the file. The browser runtime loads
+the whole file into memory.
+
 ## The MCP wrapper
 
 `perch mcp todo.perch` serves one fixed tool set for every object, each with a
@@ -148,13 +182,14 @@ result carries a short guide to writing an object.
 
 | Tool | Annotation | Does |
 | --- | --- | --- |
-| `describe_object` | readOnly | name, class, live check-in, tables + columns + row counts, files, next alarm, preview state |
+| `describe_object` | readOnly | name, class, live check-in, tables + columns + row counts, code files, a count of static files, next alarm, preview state |
 | `read_code` | readOnly | files at a check-in (live, `preview`, or an id prefix); binary as `{ base64 }` by path |
 | `list_checkins` | readOnly | history and the migrations each check-in added; unified diffs on request |
 | `query_data` | readOnly | read-only SQL over data tables, live or preview, 500 rows max |
 | `propose_change` | destructive | whole files, `edits` (exact old/new string replacements) and new migrations, applied to a preview copy (`todo.perch.preview`, live data included) and built there: modules load, the constructor runs, stored tests run. Proposals stack; `restart: true` starts from live |
 | `test_call` | destructive | a write call on the preview: POST/PUT/PATCH/DELETE to fetch(), an RPC method, or alarm(); returns the result, logs and rows changed per table |
 | `read_object` | readOnly | a read of live or the preview: GET/HEAD to fetch() or `public/`, or an RPC method. Enforced by the runtime: any SQL write, KV write or alarm change is refused and the transaction is rolled back |
+| `import_files` | destructive | imports a directory of static files from disk into `public/` on live, as one check-in; files stream, none pass through the agent |
 | `run_tests` | readOnly | runs `test/*.ts`, each test on its own fresh empty copy of the object |
 | `list_changes` | readOnly | recent data changes on live: event, time, rows per table, whether undoable |
 | `undo_changes` | destructive | reverses a data change and every newer one in one transaction; refused across a migration; recorded, so it can be undone |
@@ -218,7 +253,7 @@ checked by the end-to-end suite:
 
 | Rule | How perch meets it |
 | --- | --- |
-| Every tool has a `title` and `readOnlyHint: true` or `destructiveHint: true` | All thirteen do, exactly one each. Seven are read-only; the six that modify anything (including the preview copy) are destructive |
+| Every tool has a `title` and `readOnlyHint: true` or `destructiveHint: true` | All fourteen do, exactly one each. Seven are read-only; the seven that modify anything (including the preview copy) are destructive |
 | No tool accepts both safe and unsafe HTTP methods | `read_object` takes only GET and HEAD; `test_call` and `call_object` take only POST, PUT, PATCH and DELETE, and each refuses the other's methods with the name of the right tool |
 | Read-only means read-only | `read_object` and `query_data` are enforced by the SQLite authorizer and the runtime, not by convention: writes error and nothing is saved |
 | Freeform tools name their target API | `query_data` and migrations link the SQLite docs; `propose_change` links the Cloudflare Durable Objects API; the call tools name the object's own `fetch()` routes and public methods |
@@ -306,7 +341,8 @@ do locally. Moving state in or out of Cloudflare is not in v0.
   files (every clean-URL case, 304s, HEAD, base64 images, serving while the
   constructor throws, the export's assets config), edits, the stored-test
   release gate, data undo and redo, and the directory rules
-  below (annotations, read/write separation, enforced read-only calls) (112 checks).
+  below (annotations, read/write separation, enforced read-only calls), and bulk
+  import of static files (127 checks).
 - `bun test/http-calls.ts <base>` runs the same 17 HTTP calls (API, RPC, alarm,
   static files, an imported template) against any host; it passes against
   `perch run` and against the `perch export` deploy on Cloudflare.

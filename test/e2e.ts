@@ -31,6 +31,14 @@ function sh(args: string[]): any {
   return JSON.parse(r.stdout.toString());
 }
 
+// As sh, for commands expected to fail: returns the exit code and any JSON printed.
+function shFail(args: string[]): { code: number; out: any } {
+  const p = Bun.spawnSync([PERCH, ...args], { stderr: "pipe" });
+  let out: any = null;
+  try { out = JSON.parse(p.stdout.toString()); } catch {}
+  return { code: p.exitCode, out };
+}
+
 class Mcp {
   proc: ChildProcess;
   next = 1;
@@ -66,7 +74,7 @@ const init = await mcp.rpc("initialize", { protocolVersion: "2025-06-18", capabi
 ok(init.result.instructions.includes("propose_change"), "initialize returns the agent guide");
 const list = await mcp.rpc("tools/list");
 const names = list.result.tools.map((t: any) => t.name);
-ok(names.length === 13, `thirteen tools (${names.join(", ")})`);
+ok(names.length === 14, `fourteen tools (${names.join(", ")})`);
 ok(list.result.tools.every((t: any) => t.title && t.annotations), "every tool has a title and annotations");
 const ann = Object.fromEntries(list.result.tools.map((t: any) => [t.name, t.annotations]));
 ok(list.result.tools.every((t: any) => (t.annotations.readOnlyHint === true) !== (t.annotations.destructiveHint === true)), "every tool is exactly one of readOnlyHint or destructiveHint");
@@ -303,13 +311,13 @@ ok(r.v.status === 200 && r.v.body === "<h1>dynamic</h1>" && !r.v.asset, "fetch()
 r = await m2.tool("read_code", { checkin: "preview", path: "public/logo.png" });
 ok(Buffer.from(r.v.files["public/logo.png"].base64, "base64").equals(PNG), "read_code returns binary as base64, byte-identical");
 r = await m2.tool("read_code", { checkin: "preview" });
-ok(r.v.files["public/logo.png"].binary && r.v.files["public/index.html"] === "<h1>home</h1>", "full listing stubs binary, inlines text");
+ok(r.v.public.files === 4 && !("public/logo.png" in r.v.files) && r.v.files["src/hello.html"] === "<h1>dynamic</h1>", "the full listing inlines code and only counts static files");
 r = await m2.tool("release_change", {});
 ok(!r.isError, "release the site");
 r = await m2.tool("describe_object");
-ok(r.v.public.length === 4 && r.v.files.every((f: any) => f.path.startsWith("src/")), "describe_object lists static files separately");
+ok(r.v.public.files === 4 && r.v.public.bytes > 100 && r.v.public.first.includes("public/logo.png") && r.v.files.every((f: any) => f.path.startsWith("src/")), "describe_object lists code files and summarises static files");
 r = await m2.tool("list_checkins", { diffs: true });
-ok(r.v.checkins[0].diff.includes("Binary file public/logo.png differs"), "diffs mark binary files");
+ok(r.v.checkins[0].diff.includes("Static file public/logo.png added") && r.v.checkins[0].public_files === 4, "diffs name static files without reading them");
 r = await m2.tool("read_object", { kind: "fetch", path: "/docs/" });
 ok(r.v.body === "<h1>docs</h1>" && r.v.read_only, "static files on live through read_object");
 m2.close();
@@ -429,6 +437,63 @@ ok(r.v.checkins[0].diff === undefined, "list_checkins leaves diffs out unless as
 m3.close();
 
 ok(sh(["test", gate]).passed === 8, "perch test runs the stored tests from the CLI");
+
+// ------------------------------------------------------------------ bulk import of static files
+const big = join(dir, "gallery.perch");
+const photos = mkdtempSync(join(tmpdir(), "perch-photos-"));
+const N = 3000;
+for (let i = 0; i < N; i++) {
+  const sub = join(photos, `set${i % 3}`);
+  if (i < 3) await Bun.write(join(sub, ".keep"), "");
+  await Bun.write(join(sub, `p${String(i).padStart(5, "0")}.jpg`), `photo ${i} ` + "x".repeat(900));
+}
+await Bun.write(join(photos, ".DS_Store"), "junk");
+sh(["new", big, "--class", "Todo", "--name", "gallery", "--from", join(ROOT, "examples/todo")]);
+const before3 = sh(["describe", big]).public.files;
+let imp = sh(["import", big, photos, "--into", "public/img"]);
+ok(imp.imported && imp.added === N && imp.public_files === before3 + N, `perch import streams ${N} files into public/img/ as one check-in`);
+ok(sh(["checkins", big]).checkins[0].public_files === before3 + N && sh(["checkins", big]).total === 2, "the import is one check-in");
+imp = sh(["import", big, photos, "--into", "public/img"]);
+ok(!imp.imported && imp.unchanged === N && sh(["checkins", big]).total === 2, "importing the same directory again changes nothing");
+await Bun.write(join(photos, "set0/p00000.jpg"), "a new version of photo 0");
+await Bun.write(join(photos, "set1/extra.jpg"), "one more");
+(await import("node:fs")).rmSync(join(photos, "set2/p00002.jpg"));
+imp = sh(["import", big, photos, "--into", "public/img", "--prune"]);
+ok(imp.added === 1 && imp.replaced === 1 && imp.removed === 1 && imp.unchanged === N - 2, "a later import adds, replaces and (with --prune) removes only what changed");
+ok(shFail(["import", big, photos, "--into", "src/"]).code !== 0, "import refuses to write outside public/");
+const port4 = port + 3;
+run = await serve(big, port4);
+res = await fetch(`http://127.0.0.1:${port4}/img/set0/p00000.jpg`);
+ok(res.status === 200 && res.headers.get("content-type") === "image/jpeg" && (await res.text()) === "a new version of photo 0", "an imported file is served, with its replaced contents");
+ok((await fetch(`http://127.0.0.1:${port4}/img/set2/p00002.jpg`)).status === 404 && (await fetch(`http://127.0.0.1:${port4}/img/.DS_Store`)).status === 404, "pruned files and dotfiles are not served");
+const t0 = performance.now();
+for (let i = 3; i < 303; i++) await (await fetch(`http://127.0.0.1:${port4}/img/set${i % 3}/p${String(i).padStart(5, "0")}.jpg`)).arrayBuffer();
+const perReq = (performance.now() - t0) / 300;
+ok(perReq < 5, `static files are served from an in-memory index (${perReq.toFixed(2)} ms each)`);
+res = await fetch(`http://127.0.0.1:${port4}/todos`, { method: "POST", body: JSON.stringify({ title: "code still runs" }), headers: { "content-type": "application/json" } });
+ok(res.status === 201, "the class still runs beside thousands of static files");
+// An import while the server runs: the new file is served without a restart.
+await Bun.write(join(photos, "set1/late.jpg"), "added while running");
+sh(["import", big, photos, "--into", "public/img"]);
+res = await fetch(`http://127.0.0.1:${port4}/img/set1/late.jpg`);
+ok(res.status === 200 && (await res.text()) === "added while running", "a running server picks up an import");
+run.kill();
+// The agent's route: the same import as an MCP tool, by directory path.
+const m4 = new Mcp(big);
+await m4.rpc("initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "e2e", version: "0" } });
+await Bun.write(join(photos, "set0/from-agent.jpg"), "via mcp");
+r = await m4.tool("import_files", { dir: photos, into: "public/img/" });
+ok(!r.isError && r.v.added === 1 && r.v.unchanged >= N - 1, "import_files imports a directory by path over MCP");
+r = await m4.tool("propose_change", { message: "edit code beside the photos", edits: [{ path: "src/index.ts", old: '{ error: "title is required" }', new: '{ error: "a title is required" }' }] });
+ok(r.v.build.ok && r.v.tests.ok, "code changes still build and pass tests with the photos in place");
+r = await m4.tool("import_files", { dir: photos });
+ok(r.isError && r.text.includes("unreleased preview"), "import is refused while a preview is unreleased");
+r = await m4.tool("release_change", {});
+ok(!r.isError && sh(["describe", big]).public.files === imp.public_files + 2, "a code release keeps every static file");
+m4.close();
+const exp = join(dir, "gallery-export");
+const ex = sh(["export", big, exp]);
+ok(ex.warnings.length === 0 && readFileSync(join(exp, "public/img/set0/p00000.jpg"), "utf8") === "a new version of photo 0", "export writes the imported files, with no warning under the Cloudflare limit");
 
 console.log(`\n${passed} checks passed (${dir})`);
 process.exit(0);

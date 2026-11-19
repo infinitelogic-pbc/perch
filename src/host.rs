@@ -79,6 +79,9 @@ pub struct Host {
     echo_logs: bool,
     /// Logs from a constructor run, carried into the next outcome.
     pending_logs: Vec<LogLine>,
+    /// The live check-in's static files (path -> blob hash), kept in memory so
+    /// serving one is a keyed lookup. Rebuilt when the live check-in moves.
+    asset_index: std::cell::RefCell<Option<(String, std::rc::Rc<crate::store::Manifest>)>>,
     /// Test files to load alongside the class (scratch objects only).
     tests: Vec<String>,
     /// The data epoch the engine was built at; an undo bumps it.
@@ -121,6 +124,7 @@ impl Host {
             loaded: None,
             echo_logs,
             pending_logs: vec![],
+            asset_index: std::cell::RefCell::new(None),
             tests: vec![],
             epoch: None,
             read_only: false,
@@ -146,7 +150,8 @@ impl Host {
         self.epoch = epoch;
         self.engine = None;
         self.loaded = None;
-        let files = self.store.files_at(&live)?;
+        // Code only: static files under public/ are never loaded to run the class.
+        let files = self.store.code_files_at(&live)?;
         let main = self.store.meta("main")?.unwrap_or_else(|| DEFAULT_MAIN.to_string());
         let class = self.store.meta_req("class")?;
         let name = self.store.meta_req("name")?;
@@ -241,8 +246,25 @@ impl Host {
         if u.path().starts_with("/.perch/") {
             return Ok(None);
         }
-        let (checkin, manifest) = self.store.live_manifest()?;
-        if !manifest.keys().any(|k| k.starts_with(PUBLIC_DIR)) {
+        let checkin = self.store.live_checkin()?;
+        let manifest = {
+            let mut cached = self.asset_index.borrow_mut();
+            match &*cached {
+                Some((id, m)) if *id == checkin => m.clone(),
+                _ => {
+                    let m: crate::store::Manifest = self
+                        .store
+                        .manifest_at(&checkin)?
+                        .into_iter()
+                        .filter(|(k, _)| k.starts_with(PUBLIC_DIR))
+                        .collect();
+                    let m = std::rc::Rc::new(m);
+                    *cached = Some((checkin.clone(), m.clone()));
+                    m
+                }
+            }
+        };
+        if manifest.is_empty() {
             return Ok(None);
         }
         let path = assets::decode_path(u.path());

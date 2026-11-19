@@ -21,7 +21,7 @@ Writing the object:
 - Storage: this.ctx.storage.sql.exec(sql, ...bindings) returns a cursor (.toArray(), .one(), .raw(), rowsWritten). this.ctx.storage.get/put/delete/list is the key-value half. ctx.storage.transactionSync(fn) for atomic multi-statement writes. Every event already runs in its own transaction.
 - Schema changes go ONLY in propose_change migrations (ordered, forward-only SQL). Object code cannot CREATE/ALTER/DROP, and cannot touch _perch_* tables.
 - Data tables need a declared PRIMARY KEY; use UUIDv7 TEXT keys (crypto.randomUUID() is v4; build v7 from Date.now() + crypto.getRandomValues) rather than INTEGER/AUTOINCREMENT so copies of the file can merge changesets later.
-- Web pages: files under public/ are static and served before fetch() without waking the object (public/index.html at /, public/about.html at /about, public/docs/index.html at /docs/; /about.html redirects to /about; GET/HEAD only; ETag + 304). Unmatched requests go to fetch(). Binary files (images, fonts) are { "base64": "..." } in propose_change. Templates for dynamic pages can be imported as strings: import page from "./page.html" (also .txt .sql .css .md .svg). The same layout exports to Cloudflare Static Assets unchanged.
+- Web pages: files under public/ are static and served before fetch() without waking the object (public/index.html at /, public/about.html at /about, public/docs/index.html at /docs/; /about.html redirects to /about; GET/HEAD only; ETag + 304). Unmatched requests go to fetch(). Binary files (images, fonts) are { "base64": "..." } in propose_change; for a folder of them, import_files reads straight from disk (tens of thousands of files are fine). Templates for dynamic pages can be imported as strings: import page from "./page.html" (also .txt .sql .css .md .svg). The same layout exports to Cloudflare Static Assets unchanged.
 - Editing: after the first version, change files with propose_change `edits` (exact old/new string replacement) instead of resending whole files.
 - Tests: put tests in test/*.ts. They run on every propose_change and release_change refuses while any fail. Each test gets a fresh, empty copy of the object:
     import { test, expect } from "perch:test";
@@ -150,6 +150,18 @@ fn tools_list() -> Value {
             "annotations": { "title": "Read from object", "readOnlyHint": true, "idempotentHint": true, "openWorldHint": false }
         },
         {
+            "name": "import_files",
+            "title": "Import static files",
+            "description": "Import a directory of static files (images, fonts, documents) from this machine's disk into the live object's public/ tree, as one check-in. The files stream from disk, so tens of thousands are fine and none pass through this conversation: give the directory path. Files already present with the same contents are skipped, so a repeat run is cheap. Changes the live object directly (static files cannot change what the class does); refused while a preview is unreleased. For code, tests and a few small files, use propose_change.",
+            "inputSchema": { "type": "object", "properties": {
+                "dir": { "type": "string", "description": "absolute path of the directory to read, recursively" },
+                "into": { "type": "string", "default": "public/", "description": "where the files go inside the object; must be under public/, e.g. public/img/" },
+                "prune": { "type": "boolean", "default": false, "description": "also remove files under `into` that the directory does not have" },
+                "message": { "type": "string", "description": "check-in message" }
+            }, "required": ["dir"] },
+            "annotations": { "title": "Import static files", "readOnlyHint": false, "destructiveHint": true, "idempotentHint": true, "openWorldHint": false }
+        },
+        {
             "name": "run_tests",
             "title": "Run stored tests",
             "description": "Run the object's test/*.ts files. Each test gets its own fresh, empty copy of the object (same code, all migrations, no data) and a controllable clock, so results never depend on live data. Runs the preview's tests when a preview exists, else live's. propose_change runs these automatically and release_change refuses while any fail.",
@@ -223,6 +235,11 @@ async fn call_tool(tools: &mut Tools, name: &str, args: Value) -> Result<Value> 
         "read_object" => {
             let target = s("target");
             tools.read_object(serde_json::from_value::<CallArgs>(args)?, target.as_deref()).await
+        }
+        "import_files" => {
+            let dir = s("dir").ok_or_else(|| anyhow::anyhow!("dir is required"))?;
+            let prune = args.get("prune").and_then(|v| v.as_bool()).unwrap_or(false);
+            tools.import_files(std::path::Path::new(&dir), s("into").as_deref(), s("message"), prune, &mut |_| {})
         }
         "run_tests" => tools.run_tests(s("target").as_deref()).await,
         "list_changes" => tools.list_changes(args.get("limit").and_then(|v| v.as_u64()).unwrap_or(20) as usize),

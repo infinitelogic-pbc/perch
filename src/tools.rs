@@ -11,7 +11,7 @@ use serde_json::{Value, json};
 
 use crate::engine::exec_sql;
 use crate::host::{Event, Host, Outcome};
-use crate::store::{Files, Migration, Mode, PUBLIC_DIR, Store, now_ms, schema_fits};
+use crate::store::{Files, Manifest, Migration, Mode, PUBLIC_DIR, Store, now_ms, schema_fits};
 
 pub struct Tools {
     pub path: PathBuf,
@@ -133,18 +133,19 @@ fn iso(ms: i64) -> String {
     format!("{y:04}-{mo:02}-{d:02}T{h:02}:{m:02}:{s:02}Z")
 }
 
-/// Write files + migrations as a new check-in and make it live in `store`,
+/// Write a file list + migrations as a new check-in and make it live in `store`,
 /// all in one transaction. Migration data changes are recorded as a changeset.
 fn commit_checkin(
     store: &Store,
     parent: Option<&str>,
-    files: &Files,
+    build: impl FnOnce(&Store) -> Result<Manifest>,
     migrations: &[Migration],
     message: &str,
 ) -> Result<(String, Vec<String>)> {
     store.with_mode(Mode::Privileged, |c| c.execute_batch("BEGIN IMMEDIATE"))?;
     let r = (|| {
-        let manifest = store.put_files(files)?;
+        // `build` stores any new blobs and returns the check-in's file list.
+        let manifest = build(store)?;
         let id = store.insert_checkin(parent, &manifest, message)?;
         let conn = store.conn.clone();
         let mut session = Session::new(&conn)?;
@@ -265,14 +266,22 @@ impl Tools {
                 })
             })
             .collect();
-        let files: Vec<Value> = ck
-            .manifest
-            .iter()
-            .map(|(p, h)| {
-                let size = s.blob(h).map(|b| b.len()).unwrap_or(0);
-                json!({ "path": p, "bytes": size })
-            })
-            .collect();
+        // Code files are listed one by one. Static files can number in the tens
+        // of thousands, so they are summarised: count, total size, a sample.
+        let mut files: Vec<Value> = vec![];
+        let (mut public_n, mut public_bytes, mut public_sample) = (0usize, 0u64, Vec::<&String>::new());
+        for (p, h) in &ck.manifest {
+            let size = s.blob_size(h)?;
+            if p.starts_with(PUBLIC_DIR) {
+                public_n += 1;
+                public_bytes += size;
+                if public_sample.len() < 20 {
+                    public_sample.push(p);
+                }
+            } else {
+                files.push(json!({ "path": p, "bytes": size }));
+            }
+        }
         let alarm = s.alarm()?;
         let kv_keys: i64 = s.with_mode(Mode::Privileged, |c| {
             c.query_row("SELECT count(*) FROM _perch_kv", [], |r| r.get(0))
@@ -293,8 +302,8 @@ impl Tools {
             "live_checkin": { "id": ck.id, "message": ck.message, "at": iso(ck.created_at) },
             "tables": tables,
             "kv_keys": kv_keys,
-            "files": files.iter().filter(|f| !f["path"].as_str().unwrap_or("").starts_with(PUBLIC_DIR)).collect::<Vec<_>>(),
-            "public": files.iter().filter(|f| f["path"].as_str().unwrap_or("").starts_with(PUBLIC_DIR)).collect::<Vec<_>>(),
+            "files": files,
+            "public": { "files": public_n, "bytes": public_bytes, "first": public_sample },
             "migrations_applied": s.migrations()?.len(),
             "next_alarm": alarm_json(alarm),
             "recorded_changesets": changes,
@@ -308,31 +317,42 @@ impl Tools {
 
     pub fn read_code(&self, checkin: Option<&str>, path: Option<&str>) -> Result<Value> {
         let s = self.store()?;
-        let (id, files) = match checkin {
+        let preview;
+        let (src, id): (&Store, String) = match checkin {
             Some("preview") => {
-                let p = self.preview_store()?.ok_or_else(|| anyhow!("there is no preview copy; propose_change creates one"))?;
-                let head = p.live_checkin()?;
-                (head.clone(), p.files_at(&head)?)
+                preview = self.preview_store()?.ok_or_else(|| anyhow!("there is no preview copy; propose_change creates one"))?;
+                let head = preview.live_checkin()?;
+                (&preview, head)
             }
-            Some(c) => {
-                let id = s.resolve_checkin(c)?;
-                (id.clone(), s.files_at(&id)?)
-            }
-            None => {
-                let id = s.live_checkin()?;
-                (id.clone(), s.files_at(&id)?)
-            }
+            Some(c) => (&s, s.resolve_checkin(c)?),
+            None => (&s, s.live_checkin()?),
         };
+        let manifest = src.manifest_at(&id)?;
         // Text comes back as a string. Binary comes back as { base64 } when asked
         // for by path, and as a stub in the full listing so it stays small.
-        let out: BTreeMap<String, Value> = match path {
-            Some(p) => {
-                let c = files.get(p).ok_or_else(|| anyhow!("no file {p} at check-in {}", &id[..12]))?;
-                BTreeMap::from([(p.to_string(), file_json(c, true))])
+        if let Some(p) = path {
+            let h = manifest.get(p).ok_or_else(|| anyhow!("no file {p} at check-in {}", &id[..12]))?;
+            return Ok(json!({ "checkin": id, "files": { p: file_json(&src.blob(h)?, true) } }));
+        }
+        // The full listing reads code files only. Static files under public/
+        // are summarised, never loaded: there may be tens of thousands.
+        let mut out: BTreeMap<String, Value> = BTreeMap::new();
+        let (mut public_n, mut public_bytes) = (0usize, 0u64);
+        for (p, h) in &manifest {
+            if p.starts_with(PUBLIC_DIR) {
+                public_n += 1;
+                public_bytes += src.blob_size(h)?;
+            } else if src.blob_size(h)? > 32 * 1024 {
+                out.insert(p.clone(), json!({ "text": true, "bytes": src.blob_size(h)?, "note": "large file: pass path to read it" }));
+            } else {
+                out.insert(p.clone(), file_json(&src.blob(h)?, false));
             }
-            None => files.iter().map(|(p, c)| (p.clone(), file_json(c, false))).collect(),
-        };
-        Ok(json!({ "checkin": id, "files": out }))
+        }
+        Ok(json!({
+            "checkin": id,
+            "files": out,
+            "public": { "files": public_n, "bytes": public_bytes, "note": "static files are not listed here; pass path to read one" },
+        }))
     }
 
     pub fn list_checkins(&self, limit: usize, diffs: bool) -> Result<Value> {
@@ -353,25 +373,37 @@ impl Tools {
                 "message": ck.message,
                 "at": iso(ck.created_at),
                 "live": ck.id == live,
-                "files": ck.manifest.keys().collect::<Vec<_>>(),
+                "files": ck.manifest.keys().filter(|p| !p.starts_with(PUBLIC_DIR)).collect::<Vec<_>>(),
+                "public_files": ck.manifest.keys().filter(|p| p.starts_with(PUBLIC_DIR)).count(),
                 "migrations": added,
             });
             if diffs {
-                let parent_files = match &ck.parent {
-                    Some(p) => s.files_at(p).unwrap_or_default(),
-                    None => BTreeMap::new(),
+                // Compare file lists by hash; read contents only for files that changed.
+                let parent = match &ck.parent {
+                    Some(p) => s.manifest_at(p).unwrap_or_default(),
+                    None => Manifest::new(),
                 };
-                let files = s.files_at(&ck.id)?;
                 let mut d = String::new();
-                let paths: std::collections::BTreeSet<&String> = parent_files.keys().chain(files.keys()).collect();
+                let mut static_changed = 0usize;
+                let paths: std::collections::BTreeSet<&String> = parent.keys().chain(ck.manifest.keys()).collect();
                 for p in paths {
-                    let (ab, bb) = (parent_files.get(p), files.get(p));
-                    if ab == bb {
+                    let (ah, bh) = (parent.get(p), ck.manifest.get(p));
+                    if ah == bh {
                         continue;
                     }
+                    if p.starts_with(PUBLIC_DIR) {
+                        // Static files are reported, not diffed, and only the first few by name.
+                        static_changed += 1;
+                        if static_changed <= 20 {
+                            d.push_str(&format!("Static file {p} {}\n", match (ah, bh) { (None, _) => "added", (_, None) => "removed", _ => "changed" }));
+                        }
+                        continue;
+                    }
+                    let ab = ah.map(|h| s.blob(h)).transpose()?;
+                    let bb = bh.map(|h| s.blob(h)).transpose()?;
                     let (a, b) = match (
-                        ab.map(|x| std::str::from_utf8(x)).transpose(),
-                        bb.map(|x| std::str::from_utf8(x)).transpose(),
+                        ab.as_deref().map(std::str::from_utf8).transpose(),
+                        bb.as_deref().map(std::str::from_utf8).transpose(),
                     ) {
                         (Ok(a), Ok(b)) => (a.unwrap_or(""), b.unwrap_or("")),
                         _ => {
@@ -380,9 +412,12 @@ impl Tools {
                         }
                     };
                     let diff = similar::TextDiff::from_lines(a, b);
-                    let from = if parent_files.contains_key(p) { format!("a/{p}") } else { "/dev/null".into() };
-                    let to = if files.contains_key(p) { format!("b/{p}") } else { "/dev/null".into() };
+                    let from = if ah.is_some() { format!("a/{p}") } else { "/dev/null".into() };
+                    let to = if bh.is_some() { format!("b/{p}") } else { "/dev/null".into() };
                     d.push_str(&diff.unified_diff().context_radius(3).header(&from, &to).to_string());
+                }
+                if static_changed > 20 {
+                    d.push_str(&format!("… and {} more static files\n", static_changed - 20));
                 }
                 entry["diff"] = Value::String(d);
             }
@@ -430,29 +465,40 @@ impl Tools {
         }
         let p = Store::open(&ppath)?;
         let head = p.live_checkin()?;
-        let mut files = p.files_at(&head)?;
+        // The file list at the preview head, and the new contents this proposal
+        // brings. Unchanged files (all of public/, usually) are never read.
+        let mut manifest = p.manifest_at(&head)?;
+        let mut pending: BTreeMap<String, Vec<u8>> = BTreeMap::new();
         let mut changed = vec![];
         for (path, content) in &a.files {
             match content {
                 Some(v) => {
                     let c = v.bytes().map_err(|e| anyhow!("{path}: {e}"))?;
-                    if files.get(path) != Some(&c) {
+                    let hash = crate::store::sha256_hex(&c);
+                    if manifest.get(path) != Some(&hash) {
                         changed.push(path.clone());
                     }
-                    files.insert(path.clone(), c);
+                    manifest.insert(path.clone(), hash);
+                    pending.insert(path.clone(), c);
                 }
                 None => {
-                    if files.remove(path).is_some() {
+                    pending.remove(path);
+                    if manifest.remove(path).is_some() {
                         changed.push(format!("{path} (deleted)"));
                     }
                 }
             }
         }
         for e in &a.edits {
-            let cur = files
-                .get(&e.path)
-                .ok_or_else(|| anyhow!("edit: no file {} (send new files whole in `files`)", e.path))?;
-            let text = std::str::from_utf8(cur).map_err(|_| anyhow!("edit: {} is not a text file", e.path))?;
+            let cur = match pending.get(&e.path) {
+                Some(c) => c.clone(),
+                None => p.blob(
+                    manifest
+                        .get(&e.path)
+                        .ok_or_else(|| anyhow!("edit: no file {} (send new files whole in `files`)", e.path))?,
+                )?,
+            };
+            let text = std::str::from_utf8(&cur).map_err(|_| anyhow!("edit: {} is not a text file", e.path))?;
             let n = text.matches(e.old.as_str()).count();
             if e.old.is_empty() || n == 0 {
                 bail!("edit: `old` was not found in {}; it must match the file exactly, whitespace included (read_code shows the current text)", e.path);
@@ -464,9 +510,22 @@ impl Tools {
             if !changed.contains(&e.path) {
                 changed.push(e.path.clone());
             }
-            files.insert(e.path.clone(), next.into_bytes());
+            let next = next.into_bytes();
+            manifest.insert(e.path.clone(), crate::store::sha256_hex(&next));
+            pending.insert(e.path.clone(), next);
         }
-        let (id, warnings) = commit_checkin(&p, Some(&head), &files, &a.migrations, &a.message)
+        let has_tests = manifest.keys().any(|k| is_test_file(k));
+        let build = |st: &Store| -> Result<Manifest> {
+            for (path, bytes) in &pending {
+                crate::store::validate_path(path)?;
+                if bytes.len() > crate::store::MAX_FILE_BYTES {
+                    bail!("{path} is {} bytes; files are limited to 25 MiB (Cloudflare's per-asset limit)", bytes.len());
+                }
+                st.put_blob(bytes)?;
+            }
+            Ok(manifest.clone())
+        };
+        let (id, warnings) = commit_checkin(&p, Some(&head), build, &a.migrations, &a.message)
             .map_err(|e| anyhow!("{e}\n(the preview is unchanged; fix the migration or code and propose again)"))?;
         let schema = p.schema()?;
         drop(p);
@@ -488,7 +547,7 @@ impl Tools {
         }
         drop(ps);
         // Stored tests run on every proposal that builds.
-        let tests = if built.is_ok() && files.keys().any(|p| is_test_file(p)) {
+        let tests = if built.is_ok() && has_tests {
             Some(self.run_tests(Some("preview")).await?)
         } else {
             None
@@ -652,7 +711,7 @@ impl Tools {
         }
         // Stored tests gate the release. There is no override: fix the code or
         // change the test, and either way it shows in the history.
-        if p.files_at(&head)?.keys().any(|k| is_test_file(k))
+        if p.manifest_at(&head)?.keys().any(|k| is_test_file(k))
             && p.meta("preview_tested")?.as_deref() != Some(head.as_str())
         {
             let t = self.run_tests(Some("preview")).await?;
@@ -684,13 +743,23 @@ impl Tools {
             .filter(|m| ids.contains(m.3.as_str()))
             .map(|m| Migration { name: m.1, sql: m.2 })
             .collect();
-        let files = p.files_at(&head)?;
+        let manifest = p.manifest_at(&head)?;
+        let live_manifest = live.manifest_at(&live_ck)?;
         let msg = message.unwrap_or_else(|| {
             chain.iter().map(|c| c.message.as_str()).collect::<Vec<_>>().join("; ")
         });
-        drop(p);
-        let (id, warnings) = commit_checkin(&live, Some(&live_ck), &files, &migrations, &msg)
+        // Copy across only the files live does not already have, by hash.
+        let build = |st: &Store| -> Result<Manifest> {
+            for (path, hash) in &manifest {
+                if live_manifest.get(path) != Some(hash) {
+                    st.put_blob(&p.blob(hash)?)?;
+                }
+            }
+            Ok(manifest.clone())
+        };
+        let (id, warnings) = commit_checkin(&live, Some(&live_ck), build, &migrations, &msg)
             .map_err(|e| anyhow!("release failed and was rolled back; live is unchanged: {e}"))?;
+        drop(p);
         self.preview = None;
         self.live = None;
         remove_db(&preview_path(&self.path));
@@ -747,7 +816,8 @@ impl Tools {
             self.store()?
         };
         let head = s.live_checkin()?;
-        let files = s.files_at(&head)?;
+        // Tests drive the class, not public/, so scratch copies carry code only.
+        let files = s.code_files_at(&head)?;
         let test_files: Vec<String> = files.keys().filter(|p| is_test_file(p)).cloned().collect();
         let which = if use_preview { "preview" } else { "live" };
         if test_files.is_empty() {
@@ -819,6 +889,77 @@ impl Tools {
             }
         }
         Ok(v)
+    }
+
+    // ------------------------------------------------------------ bulk import
+
+    /// Import a directory of static files from disk into the live object's
+    /// `public/` tree, as one check-in. Files stream from disk into the blob
+    /// table one at a time, so the size of the directory does not matter, and
+    /// nothing passes through the caller. Static files cannot change what the
+    /// class does, so this goes straight to live without a preview.
+    pub fn import_files(
+        &mut self,
+        dir: &Path,
+        into: Option<&str>,
+        message: Option<String>,
+        prune: bool,
+        progress: &mut dyn FnMut(usize),
+    ) -> Result<Value> {
+        let mut into = into.unwrap_or(PUBLIC_DIR).trim_start_matches('/').to_string();
+        if !into.ends_with('/') {
+            into.push('/');
+        }
+        if !into.starts_with(PUBLIC_DIR) {
+            bail!("import goes under public/ (got {into:?}); code and tests change through propose_change");
+        }
+        if !dir.is_dir() {
+            bail!("{} is not a directory", dir.display());
+        }
+        let live = self.store()?;
+        let live_ck = live.live_checkin()?;
+        if let Some(p) = self.preview_store()? {
+            if p.meta("preview_base")?.as_deref() == Some(live_ck.as_str()) {
+                bail!("there is an unreleased preview; release it (or discard it with propose_change restart: true) before importing, because an import moves the live check-in");
+            }
+        }
+        let base = live.manifest_at(&live_ck)?;
+        let msg = message.unwrap_or_else(|| format!("import {} into {into}", dir.display()));
+        let mut stats = crate::store::ImportStats::default();
+        let build = |st: &Store| -> Result<Manifest> {
+            let mut m = base.clone();
+            stats = st.import_dir(dir, &into, &mut m, prune, progress)?;
+            if stats.added + stats.replaced + stats.removed == 0 {
+                bail!("{NOTHING_TO_IMPORT}");
+            }
+            Ok(m)
+        };
+        let done = commit_checkin(&live, Some(&live_ck), build, &[], &msg);
+        let total = |ck: &str| -> Result<usize> { Ok(live.manifest_at(ck)?.keys().filter(|k| k.starts_with(PUBLIC_DIR)).count()) };
+        match done {
+            Ok((id, _)) => {
+                self.live = None;
+                Ok(json!({
+                    "imported": true,
+                    "checkin": id,
+                    "into": into,
+                    "added": stats.added,
+                    "replaced": stats.replaced,
+                    "unchanged": stats.unchanged,
+                    "removed": stats.removed,
+                    "bytes_read": stats.bytes,
+                    "public_files": total(&id)?,
+                }))
+            }
+            Err(e) if e.to_string() == NOTHING_TO_IMPORT => Ok(json!({
+                "imported": false,
+                "into": into,
+                "unchanged": stats.unchanged,
+                "public_files": total(&live_ck)?,
+                "note": "every file is already in the object with the same contents; nothing was changed",
+            })),
+            Err(e) => Err(e),
+        }
     }
 
     // ------------------------------------------------------------ data undo
@@ -934,8 +1075,10 @@ impl Tools {
     }
 }
 
+const NOTHING_TO_IMPORT: &str = "nothing to import";
+
 /// Directories `perch new --from` reads object files from.
-pub const OBJECT_DIRS: &[&str] = &["src", "public", "test"];
+pub const CODE_DIRS: &[&str] = &["src", "test"];
 
 pub fn is_test_file(path: &str) -> bool {
     path.starts_with("test/") && (path.ends_with(".ts") || path.ends_with(".js"))
