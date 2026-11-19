@@ -41,20 +41,31 @@ when Claude exits. The object file stays where you put it.
 
 ## Commands
 
+<!-- generated:commands -->
+```sh
+# Create a new object file (an empty class, or code from a directory)
+perch new <FILE> [--class <CLASS>] [--name <NAME>] [--from <FROM>] [--like <LIKE>]
+# Serve an object over HTTP and fire its alarms
+perch run <FILE> [--port <PORT>] [--host <HOST>] [--no-alarms]
+# Expose the MCP wrapper over stdio
+perch mcp <FILE>
+# Print the object's description as JSON
+perch describe <FILE>
+# Call a public method on the live object
+perch call <FILE> <METHOD> [ARGS]
+# Write the live code as a Wrangler project for Cloudflare
+perch export <FILE> <OUT> [--worker-name <WORKER_NAME>]
+# Run the object's stored tests (test/*.ts), each on a fresh empty copy
+perch test <FILE>
+# Import a directory of static files into the object's public/ tree
+perch import <FILE> <DIR> [--into <INTO>] [--prune] [--message <MESSAGE>]
 ```
-perch new my.perch --class Obj             # empty class, or --from <dir> with src/ (+ test/, migrations/, public/)
-perch new shared.perch --like my.perch     # the same app without its data, for sharing
-perch mcp my.perch                         # MCP over stdio: the agent builds it
-perch run my.perch --port 8787             # serve HTTP, fire alarms
-perch call my.perch <method> '[args]'      # call a public method from the shell
-perch fetch my.perch /path                 # one request to fetch()
-perch describe my.perch                    # tables, code, recent check-ins, next alarm
-perch test my.perch                        # stored tests, each on a fresh empty copy
-perch import my.perch ./photos --into public/img/   # bulk import of static files
-perch export my.perch out/ && (cd out && bunx wrangler deploy)
-```
+<!-- /generated:commands -->
 
-`examples/todo` is a finished object to import (`perch new todo.perch --class Todo --from examples/todo`).
+`perch <command> --help` has the details. The list above and the tool table
+below are written by `web/tools/gen-facts.ts` from the binary's own answers.
+
+`examples/todo` is a finished object to import (`perch new todo.perch --from examples/todo`; the class name is read from `src/index.ts`).
 
 ## The file
 
@@ -104,8 +115,9 @@ export function migrate(storage: DurableObjectStorage): void {
 The same file runs unchanged on Cloudflare. What perch adds is the place to
 try a step before it touches real data:
 
-- **The preview is a copy of the live data.** `propose_change` runs the
-  constructor there, so a step that fails on real rows fails before release.
+- **The preview is a copy of the live data, made fresh for every proposal.**
+  `propose_change` runs the constructor there, so a step that fails on real
+  rows fails before release, and an edited step simply runs again.
 - **Stored tests start empty.** Each one builds the whole schema from nothing.
 - **A constructor that throws leaves nothing behind.** Its writes are rolled
   back.
@@ -204,10 +216,10 @@ perch import my.perch ./photos --into public/img/ --prune   # and remove what th
   version on the Free plan and 100,000 on Paid. `perch export` warns when
   `public/` is over either. Above 100,000, serve the files from R2.
 
-Still to do for very large objects: a preview is a full copy of the file, and
-each check-in stores the whole file list again, so code changes on a
-multi-gigabyte object are slow and grow the file. The browser runtime loads
-the whole file into memory.
+Still to do for very large objects: each check-in stores the whole file list
+again (3.7 MB at 41,000 files), and the browser runtime loads the whole file
+into memory. On a filesystem without copy-on-write clones, the preview is a
+full copy.
 
 ## The MCP wrapper
 
@@ -215,16 +227,37 @@ the whole file into memory.
 title and annotations; reads and writes are separate tools. The `initialize`
 result carries a short guide to writing an object.
 
+<!-- generated:tools -->
 | Tool | Annotation | Does |
 | --- | --- | --- |
-| `describe_object` | readOnly | name, class, live check-in, recent code history, tables + columns + row counts, code files, a count of static files, next alarm, preview state |
-| `read_code` | readOnly | files at a check-in (live, `preview`, or an id prefix); binary as `{ base64 }` by path |
-| `query_data` | readOnly | read-only SQL over data tables, live or preview, 500 rows max |
-| `propose_change` | destructive | whole files and `edits` (exact old/new string replacements), applied to a preview copy (`todo.perch.preview`, live data included) and built there: modules load, the constructor runs (schema steps apply), stored tests run. Proposals stack; `restart: true` starts from live; `from_checkin` starts from an earlier check-in's files, which is how code is rolled back |
-| `read_object` | readOnly | a read of live or the preview: GET/HEAD to fetch() or `public/`, or a public method. Enforced by the runtime: any SQL write, KV write or alarm change is refused and the transaction is rolled back |
-| `call_object` | destructive | a write call on live or the preview: POST/PUT/PATCH/DELETE to fetch(), or a public method; on the preview, also `alarm()`. Returns the result, logs and rows written |
-| `release_change` | destructive | makes the preview's code live, squashed into one check-in, and starts it on the live data; refused if the preview did not build, a stored test fails, or live moved; undone if the new code does not start on live |
-| `import_files` | destructive | imports a directory of static files from disk into `public/` on live, as one check-in; files stream, none pass through the agent |
+| `describe_object` | readOnly | Name, class, live check-in, recent code history (check-in ids, messages, times), data tables with columns and row counts, code file list, next alarm and preview state. Useful as the first call, to see what the object contains. target "preview" describes the preview copy (its schema, data counts and alarm). |
+| `read_code` | readOnly | Files at a check-in: the live one by default, "preview" for the preview head, or a check-in id (prefix of 4+ characters works). Pass path for one file. Text comes back as strings; binary files as { base64 } when asked for by path, otherwise as a size stub. In the full listing, text files over 32 KiB come back as a size stub too; one file by path is returned up to 512 KiB. |
+| `query_data` | readOnly | Read-only SQL over the object's own tables (SQLite dialect, see https://sqlite.org/lang_select.html). Reserved _perch_* tables and all writes are refused. target "preview" reads the preview copy. At most 500 rows. |
+| `propose_change` | destructive | Change this object's code, static files and stored tests on a preview copy of the file; the live object is not touched until release_change. Takes whole files and exact-string edits, applies them to the preview (a copy of the live file, data included), builds it (the module graph loads and the constructor runs, which is where the code creates or changes its tables) and runs the stored tests. Code is TypeScript against the Cloudflare Durable Objects API (https://developers.cloudflare.com/durable-objects/api/). There is one pending change at a time: a later proposal adds to its files, and the preview's data is rebuilt from live every time, so calls made on the preview do not carry over. from_checkin starts from an earlier check-in's files, which is how code is rolled back; from_checkin "live" discards the pending change. |
+| `read_object` | readOnly | Read from this object without changing it: a GET or HEAD to the object's own fetch() handler or its public/ files, or a call to one of its public RPC methods (the routes and methods are the ones read_code shows). The runtime enforces the read: any SQL write, key-value write or alarm change made during the call is refused with an error and nothing is saved. target "preview" reads the preview copy. Use it to view pages and call getters. |
+| `import_files` | destructive | Import a directory of static files (images, fonts, documents) from this machine's disk into the live object's public/ tree, as one check-in. The files stream from disk, so tens of thousands are fine and none pass through this conversation: give the directory path. Files already present with the same contents are skipped, so a repeat run is cheap. Changes the live object directly (static files cannot change what the class does); refused while a preview is unreleased. For code, tests and a few small files, use propose_change. |
+| `release_change` | destructive | Make the pending change live as one check-in, and start it on the live data (its constructor runs, applying any schema steps). Refused if the preview did not build, a stored test fails, or live moved since the preview was made. If the new code does not start on the live data, the release is undone and live keeps the code it had. |
+| `call_object` | destructive | Make a write call on this object: a POST, PUT, PATCH or DELETE to the object's own fetch() handler, or one of its public RPC methods (the routes and methods are the ones read_code shows). target "live" (the default) changes live data; target "preview" changes only the preview copy, and there kind "alarm" runs alarm() now (clearing the pending alarm unless the handler rescheduled it). Returns the result, console logs, rows written and the next alarm. For reads, use read_object. |
+<!-- /generated:tools -->
+
+## The preview
+
+`propose_change` works on `todo.perch.preview`, a copy of the live file with
+the change applied. There is one pending change at a time:
+
+- **Files accumulate.** A later proposal adds to the pending change, so a
+  one-line fix is one edit.
+- **Data does not.** Every proposal copies live again, so the preview always
+  shows the pending code against live's data as it is now. Calls made on the
+  preview are for trying things, and are gone at the next proposal.
+- **The copy is a clone.** On APFS, btrfs and XFS the file is cloned
+  copy-on-write, so it costs nothing to make and shares every unchanged page
+  with live. A 1 GB object takes about 0.1 s per proposal, tests included.
+- **Checked before it replaces anything.** A refused edit leaves the pending
+  change as it was. `from_checkin: "live"` discards it.
+
+`release_change` writes the pending change to live as one check-in and
+removes the preview.
 
 ## The harness is in the file
 
@@ -358,13 +391,16 @@ in v0.
   the same step then fails on the preview, serves a copy of the file, and
   covers static files (every clean-URL case, 304s, HEAD, base64 images, serving
   while the constructor throws, the export), edits, the stored-test release
-  gate, the directory rules (annotations, read/write separation, enforced
-  read-only calls), bulk import of static files, and data-free copies (140
-  checks).
+  gate, the one pending change (files carry over, data is rebuilt, a refused
+  edit loses nothing), the directory rules (annotations, read/write
+  separation, enforced read-only calls), bulk import of static files, and
+  data-free copies (143 checks).
 - `bun test/http-calls.ts <base>` runs the same 16 HTTP calls (API, alarm,
   static files, an imported template) against any host; it passes against
   `perch run` and against the `perch export` project under `wrangler dev`.
 - `cargo test` covers the URL-to-file rules.
+- `cd web && bun tools/gen-facts.ts --check` fails when the README tables or
+  the site's facts no longer match what the binary reports.
 - `cd web && bun test/runtime.ts` runs the browser runtime under bun against
   native perch in both directions: native builds a file, the WebAssembly runtime
   serves it (static files, fetch, method calls, alarm, the sandbox), and native

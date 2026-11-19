@@ -116,7 +116,9 @@ r = await mcp.tool("propose_change", {
       .replace("  // ---- RPC", "  probe(q: string) { return tryIt(this.ctx.storage.sql, q); }\n\n  // ---- RPC"),
   },
 });
-ok(r.v.build.ok && r.v.stacked_on_previous_preview, "second proposal stacks on the preview");
+ok(r.v.build.ok && r.v.continues_pending_change && r.v.message.includes("; probe the sandbox"), "a second proposal adds to the pending change");
+r = await mcp.tool("query_data", { sql: "SELECT count(*) FROM todos", target: "preview" });
+ok(r.v.rows[0][0] === 0, "the preview's data is rebuilt from live on every proposal");
 for (const q of [
   "SELECT * FROM _perch_meta",
   "UPDATE _perch_checkins SET message = 'x'",
@@ -147,8 +149,13 @@ r = await mcp.tool("query_data", { sql: "CREATE TABLE q (id TEXT)", target: "pre
 ok(r.isError, "query_data refuses schema changes");
 
 // Discard the probe: start over from live with the clean code.
-r = await mcp.tool("propose_change", { restart: true, message: "to-do API with nightly cleanup", files: TODO });
-ok(r.v.build.ok && !r.v.stacked_on_previous_preview, "restart starts from live");
+r = await mcp.tool("propose_change", { message: "x", edits: [{ path: "src/index.ts", old: "this text is not in the file", new: "y" }] });
+r = await mcp.tool("read_code", { checkin: "preview", path: "src/evil.ts" });
+ok(!r.isError, "a refused proposal leaves the pending change as it was");
+r = await mcp.tool("propose_change", { from_checkin: "live", message: "nothing" });
+ok(!r.isError && r.v.pending === false && !existsSync(file + ".preview"), "from_checkin live discards the pending change");
+r = await mcp.tool("propose_change", { message: "to-do API with nightly cleanup", files: TODO });
+ok(r.v.build.ok && !r.v.continues_pending_change, "the next proposal starts from live");
 r = await mcp.tool("release_change", {});
 ok(!r.isError && r.v.released, `release_change moves live (${r.v.released?.slice(0, 12)})`);
 const good = r.v.released as string;
@@ -245,13 +252,14 @@ r = await mcp.tool("read_object", { kind: "rpc", method: "stats" });
 ok(r.v.ok && r.v.result.total === 2, "the live object still runs");
 r = await mcp.tool("query_data", { sql: "SELECT count(*) FROM schema_steps" });
 ok(r.v.rows[0][0] === 2, "the failed step left nothing behind");
-// Rebuilt from live, the same step now fails where it should: on the preview.
-r = await mcp.tool("propose_change", { restart: true, message: "unique titles", ...withStep("0003_unique", "CREATE UNIQUE INDEX todos_title ON todos (title);", 3) });
+// The pending change is still there. Proposed again, its preview is rebuilt
+// from live, and the same step now fails where it should: on the preview.
+r = await mcp.tool("propose_change", { message: "try again" });
 ok(r.isError && !r.v.build.ok && /UNIQUE/i.test(r.v.build.error), "a step that fails on real rows fails on the preview, before release");
 r = await mcp.tool("release_change", {});
 ok(r.isError && r.text.includes("did not build"), "a preview that did not build cannot be released");
 // Older code on a newer schema: nothing checks the fit; the preview is the test.
-r = await mcp.tool("propose_change", { restart: true, message: "back before notes", from_checkin: good });
+r = await mcp.tool("propose_change", { message: "back before notes", from_checkin: good });
 ok(r.v.build.ok && r.v.schema.todos.some((c: any) => c.name === "note"), "rolling code back leaves the schema as it is");
 run.kill();
 mcp.close();
@@ -357,7 +365,7 @@ const seed = mkdtempSync(join(tmpdir(), "perch-seed-"));
 Bun.write(join(seed, "src/index.ts"), `import { DurableObject } from "cloudflare:workers";\nexport class Bare extends DurableObject {}\n`);
 Bun.write(join(seed, "public/index.html"), "<h1>bare</h1>");
 await Bun.sleep(50);
-sh(["new", bare, "--class", "Bare", "--from", seed]);
+sh(["new", bare, "--from", seed]);
 const port3 = port + 2;
 run = await serve(bare, port3);
 res = await fetch(`http://127.0.0.1:${port3}/`);
@@ -448,7 +456,7 @@ for (let i = 0; i < N; i++) {
   await Bun.write(join(sub, `p${String(i).padStart(5, "0")}.jpg`), `photo ${i} ` + "x".repeat(900));
 }
 await Bun.write(join(photos, ".DS_Store"), "junk");
-sh(["new", big, "--class", "Todo", "--name", "gallery", "--from", join(ROOT, "examples/todo")]);
+sh(["new", big, "--name", "gallery", "--from", join(ROOT, "examples/todo")]);
 const before3 = sh(["describe", big]).public.files;
 let imp = sh(["import", big, photos, "--into", "public/img"]);
 ok(imp.imported && imp.added === N && imp.public_files === before3 + N, `perch import streams ${N} files into public/img/ as one check-in`);

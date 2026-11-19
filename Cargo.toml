@@ -19,7 +19,7 @@ deno_core = "0.413"
 deno_error = "0.7"
 fallible-iterator = "0.3"
 hex = "0.4"
-rusqlite = { version = "0.43", features = ["bundled", "hooks", "backup", "functions"] }
+rusqlite = { version = "0.43", features = ["bundled", "hooks", "functions"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"

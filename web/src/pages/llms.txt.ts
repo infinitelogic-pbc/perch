@@ -1,6 +1,6 @@
 // Generated at build time from the same facts the pages use.
 import type { APIRoute } from 'astro';
-import { TAGLINE, RESERVED, TOOLS, COMMANDS, RUNTIME, NOT_YET } from '../lib/facts';
+import { TAGLINE, RESERVED, TOOLS, COMMANDS, GUIDE, NOT_YET } from '../lib/facts';
 
 export const GET: APIRoute = ({ site }) => {
   const base = (site ?? new URL('https://perch.proc.io')).origin;
@@ -30,22 +30,11 @@ add a new one. A constructor that throws is rolled back.
 
 Preview: propose_change works on a sibling copy, \`<file>.preview\`.
 
-## Writing an object
+## The agent guide
 
-- Entry file \`src/index.ts\` exports the class named in \`_perch_meta.class\`,
-  extending \`DurableObject\` from "cloudflare:workers". Constructor is
-  (ctx, env); call super(ctx, env).
-- Single-threaded; each event (constructor, fetch, method call, alarm) is one
-  SQLite transaction.
-${RUNTIME.map((r) => `- ${r.api}: ${r.note}`).join('\n')}
-- Globals: Request, Response, Headers, URL, URLSearchParams, TextEncoder,
-  TextDecoder, crypto.randomUUID, crypto.getRandomValues, setTimeout,
-  structuredClone, atob, btoa, console.
-- A SQLite authorizer refuses, from object code: any access to \`_perch_*\`
-  tables (reading, writing or schema), BEGIN/COMMIT/SAVEPOINT, ATTACH, and all
-  pragmas except read-only introspection (table_info, table_xinfo,
-  table_list, index_list, index_info, index_xinfo, foreign_key_list).
-- Keep the class Cloudflare-compatible: \`perch export\` deploys the same source.
+This is what \`perch mcp\` gives an agent when it connects, word for word.
+
+${GUIDE}
 
 ## HTTP surface (perch run, and the perch export worker)
 
@@ -57,55 +46,18 @@ ${RUNTIME.map((r) => `- ${r.api}: ${r.note}`).join('\n')}
   \`Cache-Control: public, max-age=0, must-revalidate\`. On export, public/
   becomes \`assets.directory\`.
 - Every other request goes to the class's fetch() (a 404 if it has none).
-- Templates import as strings: \`import page from "./page.html"\` (also .txt,
-  .sql, .css, .md, .svg). Binary files go through propose_change as
-  \`{ "base64": "..." }\`; 25 MiB per file.
+  Public methods are not reachable over HTTP.
 - Many static files: \`perch import <file> <dir> --into public/img/\` (or the
   import_files tool, given a directory path) streams a directory from disk into
-  public/ as one check-in on live. Tens of thousands of files are fine. Running
-  the class never loads them, and listings count them instead of naming them.
+  public/ as one check-in on live. Running the class never loads them.
   Cloudflare allows 20,000 static files per Worker version on Free and 100,000
   on Paid; export warns above either.
-- Public methods are not reachable over HTTP. They are called from the shell
-  (\`perch call\`), the MCP tools and stored tests. Give a page a route in
-  fetch(). constructor, fetch, alarm, ctx, env and names starting with \`_\`
-  are not callable.
 
-## MCP (\`perch mcp <file>\`, stdio, JSON-RPC 2.0, one message per line)
+## MCP tools (\`perch mcp <file>\`, stdio, JSON-RPC 2.0, one message per line)
 
-Workflow: describe_object, read_code, propose_change (code and tests on the
-preview; the constructor and the stored tests run), read_object and
-call_object with target "preview" (reads and writes on the preview),
-release_change (live; refused while a stored test fails). To go back to
-earlier code, propose_change with from_checkin. read_object reads live;
-call_object writes to it.
+Every tool has a title and exactly one of readOnlyHint or destructiveHint.
 
 ${TOOLS.map((t) => `- \`${t.name}\` [${t.kind}]: ${t.does}`).join('\n')}
-
-Annotations follow Anthropic's connector directory rules: every tool has a
-title and exactly one of readOnlyHint or destructiveHint. Read-only:
-describe_object, read_code, query_data, read_object. Destructive (anything
-that modifies data, the preview copy included): propose_change, call_object,
-release_change, import_files.
-
-Reads and writes are separate tools. read_object takes GET or HEAD (or a
-public method) on live or the preview, and the runtime refuses any SQL write,
-key-value write or alarm change made during it. call_object takes POST, PUT,
-PATCH or DELETE, or a public method, on live or the preview; on the preview
-it also takes kind alarm.
-
-Edits: propose_change takes \`edits: [{ path, old, new, replace_all? }]\`.
-\`old\` must match the file exactly and occur once. Use these after the first
-version, not whole files.
-
-Stored tests: files under \`test/\` that
-\`import { test, expect } from "perch:test"\`. Each \`test(name, async (obj) => …)\`
-runs on its own fresh, empty copy of the object. \`obj\` has
-\`fetch(path, init)\` (an object body is a JSON POST), \`rpc(method, ...args)\`,
-\`alarm()\`, \`sql(query, ...bindings)\`, \`storage\`, and
-\`clock.set/advance/now\` (Date.now() follows it). \`expect\` has toBe, toEqual,
-toBeTruthy, toBeFalsy, toBeNull, toBeDefined, toContain, toHaveLength,
-toBeGreaterThan, toBeLessThan, toMatch and .not.
 
 Example client config: \`claude mcp add todo -- perch mcp todo.perch\`
 

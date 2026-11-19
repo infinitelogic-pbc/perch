@@ -35,7 +35,7 @@ Writing the object:
         }
       });
     }
-  Add a step by adding a file and an entry; never edit a step that has been released. The preview is a copy of the live data, so a step that fails on real rows fails there. A step that already ran on the preview does not run again: after changing one, propose with restart: true. A constructor that throws has its writes rolled back. Object code cannot touch _perch_* tables.
+  Add a step by adding a file and an entry; never edit a step that has been released. The preview is a copy of the live data, so a step that fails on real rows fails there. Every proposal rebuilds the preview from live, so an edited step runs again from scratch. A constructor that throws has its writes rolled back. Object code cannot touch _perch_* tables.
 - Web pages: files under public/ are static and served before fetch() without waking the object (public/index.html at /, public/about.html at /about, public/docs/index.html at /docs/; /about.html redirects to /about; GET/HEAD only; ETag + 304). Unmatched requests go to fetch(). Binary files (images, fonts) are { "base64": "..." } in propose_change; for a folder of them, import_files reads straight from disk (tens of thousands of files are fine). Templates for dynamic pages can be imported as strings: import page from "./page.html" (also .txt .sql .css .md .svg). The same layout exports to Cloudflare Static Assets unchanged.
 - Editing: after the first version, change files with propose_change `edits` (exact old/new string replacement) instead of resending whole files.
 - Tests: put tests in test/*.ts. They run on every propose_change and release_change refuses while any fail. Each test gets a fresh, empty copy of the object, whose constructor builds the tables:
@@ -117,7 +117,7 @@ fn tools_list() -> Value {
         {
             "name": "propose_change",
             "title": "Propose change",
-            "description": "Change this object's code, static files and stored tests on a preview copy of the file; the live object is not touched until release_change. Takes whole files and exact-string edits, applies them to the preview (a copy of the live file, data included), builds it (the module graph loads and the constructor runs, which is where the code creates or changes its tables) and runs the stored tests. Code is TypeScript against the Cloudflare Durable Objects API (https://developers.cloudflare.com/durable-objects/api/). Repeated proposals stack on the current preview; restart: true discards the preview and starts over from live. from_checkin starts from an earlier check-in's files, which is how code is rolled back.",
+            "description": "Change this object's code, static files and stored tests on a preview copy of the file; the live object is not touched until release_change. Takes whole files and exact-string edits, applies them to the preview (a copy of the live file, data included), builds it (the module graph loads and the constructor runs, which is where the code creates or changes its tables) and runs the stored tests. Code is TypeScript against the Cloudflare Durable Objects API (https://developers.cloudflare.com/durable-objects/api/). There is one pending change at a time: a later proposal adds to its files, and the preview's data is rebuilt from live every time, so calls made on the preview do not carry over. from_checkin starts from an earlier check-in's files, which is how code is rolled back; from_checkin \"live\" discards the pending change.",
             "inputSchema": { "type": "object", "properties": {
                 "message": { "type": "string", "description": "what this change does" },
                 "files": { "type": "object", "additionalProperties": { "anyOf": [
@@ -131,8 +131,7 @@ fn tools_list() -> Value {
                     "new": { "type": "string" },
                     "replace_all": { "type": "boolean", "default": false }
                 }, "required": ["path", "old", "new"] } },
-                "from_checkin": { "type": "string", "description": "start from the files of this earlier check-in (id or 4+ character prefix, from describe_object) instead of the live ones; discards the current preview" },
-                "restart": { "type": "boolean", "default": false, "description": "discard the current preview and start from live" }
+                "from_checkin": { "type": "string", "description": "start from the files of this earlier check-in (id or 4+ character prefix, from describe_object) instead of the pending change; \"live\" discards the pending change" }
             }, "required": ["message"] },
             "annotations": { "title": "Propose change", "readOnlyHint": false, "destructiveHint": true, "idempotentHint": false, "openWorldHint": false }
         },
@@ -158,7 +157,7 @@ fn tools_list() -> Value {
         {
             "name": "release_change",
             "title": "Release change",
-            "description": "Make the preview's code live, squashed into one check-in, and start it on the live data (its constructor runs, applying any schema steps). Refused if the preview did not build, a stored test fails, or live moved since the preview was made. If the new code does not start on the live data, the release is undone and live keeps the code it had.",
+            "description": "Make the pending change live as one check-in, and start it on the live data (its constructor runs, applying any schema steps). Refused if the preview did not build, a stored test fails, or live moved since the preview was made. If the new code does not start on the live data, the release is undone and live keeps the code it had.",
             "inputSchema": { "type": "object", "properties": {
                 "message": { "type": "string", "description": "release message; defaults to the preview check-in messages" }
             } },

@@ -1,6 +1,10 @@
-// Everything the site states about perch, in one place, so the pages and
-// /llms.txt cannot drift apart. Each entry is checked against perch/src/*.rs,
-// perch/js/bootstrap.js and perch/test/*.ts as of v0.1.0.
+// Everything the site states about perch, in one place. The tools, the
+// commands and the agent guide are not written here: generated.json is the
+// binary's own answer (tools/gen-facts.ts), so they cannot drift from it.
+import generated from './generated.json';
+
+/** The guide the MCP server hands an agent at initialize. */
+export const GUIDE: string = generated.guide;
 
 export const TAGLINE = 'One SQLite file holding a Durable Object’s code and data.';
 
@@ -55,33 +59,14 @@ export interface Tool {
   does: string;
 }
 
-export const TOOLS: Tool[] = [
-  { name: 'describe_object', kind: 'read', does: 'Name, class, live check-in, recent code history, tables with columns and row counts, files, next alarm, preview state. Start here.' },
-  { name: 'read_code', kind: 'read', does: 'Files at the live check-in, the preview, or any check-in id (a 4+ character prefix works). Binary files come back as base64.' },
-  { name: 'query_data', kind: 'read', does: 'Read-only SQL over the object’s own tables, live or preview. At most 500 rows.' },
-  { name: 'propose_change', kind: 'destructive', does: 'Changes the preview copy only. Whole files and exact-string edits, applied to a preview copy of the file (live data included) and built there: the constructor runs, which applies any new schema step, and the stored tests run. Proposals stack; restart starts over from live; from_checkin starts from an earlier check-in, which is how code is rolled back.' },
-  { name: 'read_object', kind: 'read', does: 'A read of live or the preview: GET or HEAD to fetch() or public/, or a public method. The runtime refuses any write made during it and saves nothing.' },
-  { name: 'call_object', kind: 'destructive', does: 'A write call on live or the preview: POST, PUT, PATCH or DELETE to fetch(), or a public method; on the preview, alarm() too. Returns the result, console logs and rows written.' },
-  { name: 'release_change', kind: 'destructive', does: 'Makes the preview’s code live, squashed into one check-in, and starts it on the live data. Refused if the preview did not build, a stored test fails, or live moved. Undone if the new code does not start on live.' },
-  { name: 'import_files', kind: 'destructive', does: 'Imports a directory of static files from disk into public/ on the live object, as one check-in. Files stream from disk, so tens of thousands are fine and none pass through the agent.' },
-];
+export const TOOLS: Tool[] = generated.tools.map((t) => ({ name: t.name, kind: t.kind as Tool['kind'], does: t.description }));
 
 export interface Command {
   usage: string;
   does: string;
 }
 
-export const COMMANDS: Command[] = [
-  { usage: 'perch new <file> [--class C] [--name N] [--from DIR | --like FILE]', does: 'Create an object file: an empty class, or src/**, test/**, migrations/** and public/** from a directory. With --like, a copy of another object without its data: the same code, static files and tests, no rows and no history; the code builds its tables the first time it runs.' },
-  { usage: 'perch run <file> [--port 8787] [--host 127.0.0.1] [--no-alarms]', does: 'Serve it over HTTP and fire its alarms.' },
-  { usage: 'perch mcp <file>', does: 'The MCP server, over stdio.' },
-  { usage: 'perch describe <file>', does: 'The description as JSON: tables, files, recent check-ins, next alarm.' },
-  { usage: 'perch call <file> <method> [json-args]', does: 'Call a public method on the live object.' },
-  { usage: 'perch fetch <file> <path> [-X METHOD] [-d BODY]', does: 'Send one request to the live object’s fetch().' },
-  { usage: 'perch import <file> <dir> [--into public/img/] [--prune]', does: 'Import a directory of static files into public/, streaming from disk. One check-in; unchanged files are skipped.' },
-  { usage: 'perch test <file>', does: 'Run the stored tests, each on a fresh empty copy. Exit 1 on failure.' },
-  { usage: 'perch export <file> <out> [--worker-name W]', does: 'Write the live code as a Wrangler project.' },
-];
+export const COMMANDS: Command[] = generated.commands.map((c) => ({ usage: c.usage, does: c.about }));
 
 /** What the runtime gives object code today. */
 export const RUNTIME: { api: string; note: string }[] = [

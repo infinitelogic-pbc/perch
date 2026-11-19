@@ -37,8 +37,6 @@ pub struct ProposeArgs {
     #[serde(default)]
     pub migrations: Option<Value>,
     pub message: String,
-    #[serde(default)]
-    pub restart: bool,
 }
 
 #[derive(Deserialize, Clone)]
@@ -105,7 +103,7 @@ pub struct CallArgs {
     pub method: Option<String>,
     #[serde(default)]
     pub args: Vec<Value>,
-    /// Set by the CLI and by read_object, never by MCP input: allow GET/HEAD.
+    /// Set by read_object, never by MCP input: allow GET/HEAD.
     #[serde(skip)]
     pub allow_safe: bool,
 }
@@ -383,31 +381,43 @@ impl Tools {
         }
         let live = self.store()?;
         let live_ck = live.live_checkin()?;
-        let from = a.from_checkin.as_deref().map(|c| live.resolve_checkin(c)).transpose()?;
+        let from = match a.from_checkin.as_deref() {
+            Some("live") => Some(live_ck.clone()),
+            Some(c) => Some(live.resolve_checkin(c)?),
+            None => None,
+        };
         let ppath = preview_path(&self.path);
-        let stack = !a.restart
-            && from.is_none()
-            && match self.preview_store()? {
-                Some(p) => p.meta("preview_base")?.as_deref() == Some(live_ck.as_str()),
-                None => false,
-            };
         self.drop_hosts();
-        if !stack {
-            remove_db(&ppath);
-            live.backup_to(&ppath)?;
-            let p = Store::open(&ppath)?;
-            p.set_meta("preview_base", &live_ck)?;
-            p.delete_meta("preview_built")?;
+        // One pending change at a time. Its files carry over from the last
+        // proposal; its data never does: every proposal starts from a fresh
+        // copy of the live file, so the constructor (and any schema step) runs
+        // against live's data as it is now. Nothing is replaced until the new
+        // proposal has been checked, so a refused edit loses nothing.
+        let mut source: Option<(Store, Manifest, String)> = None;
+        let mut discarded_stale = false;
+        if let Some(old) = self.preview_store()? {
+            let base = old.meta("preview_base")?;
+            let head = old.live_checkin()?;
+            let pending = base.as_deref() != Some(head.as_str());
+            if base.as_deref() != Some(live_ck.as_str()) {
+                discarded_stale = pending;
+            } else if pending && from.is_none() {
+                let ck = old.checkin(&head)?;
+                source = Some((old, ck.manifest, ck.message));
+            }
         }
-        let p = Store::open(&ppath)?;
-        let head = p.live_checkin()?;
-        // The file list at the preview head, and the new contents this proposal
-        // brings. Unchanged files (all of public/, usually) are never read.
-        let head_manifest = p.manifest_at(&head)?;
-        let mut manifest = match &from {
-            // The preview is a copy of live, so it holds every earlier check-in.
-            Some(id) => p.manifest_at(id)?,
-            None => head_manifest.clone(),
+        let head_manifest = live.manifest_at(&live_ck)?;
+        let continues = source.is_some();
+        let mut manifest = match (&from, &source) {
+            (Some(id), _) => live.manifest_at(id)?,
+            (None, Some((_, m, _))) => m.clone(),
+            (None, None) => head_manifest.clone(),
+        };
+        let read = |hash: &str| -> Result<Vec<u8>> {
+            match &source {
+                Some((old, _, _)) => old.blob(hash),
+                None => live.blob(hash),
+            }
         };
         let mut pending: BTreeMap<String, Vec<u8>> = BTreeMap::new();
         let mut changed = vec![];
@@ -440,7 +450,7 @@ impl Tools {
         for e in &a.edits {
             let cur = match pending.get(&e.path) {
                 Some(c) => c.clone(),
-                None => p.blob(
+                None => read(
                     manifest
                         .get(&e.path)
                         .ok_or_else(|| anyhow!("edit: no file {} (send new files whole in `files`)", e.path))?,
@@ -462,18 +472,49 @@ impl Tools {
             manifest.insert(e.path.clone(), crate::store::sha256_hex(&next));
             pending.insert(e.path.clone(), next);
         }
+        for (path, bytes) in &pending {
+            crate::store::validate_path(path)?;
+            if bytes.len() > crate::store::MAX_FILE_BYTES {
+                bail!("{path} is {} bytes; files are limited to 25 MiB (Cloudflare's per-asset limit)", bytes.len());
+            }
+        }
         let has_tests = manifest.keys().any(|k| is_test_file(k));
-        let build = |st: &Store| -> Result<Manifest> {
-            for (path, bytes) in &pending {
-                crate::store::validate_path(path)?;
-                if bytes.len() > crate::store::MAX_FILE_BYTES {
-                    bail!("{path} is {} bytes; files are limited to 25 MiB (Cloudflare's per-asset limit)", bytes.len());
+        // Files the pending change brought earlier, which live does not hold.
+        let mut carry = vec![];
+        if let Some((old, _, _)) = &source {
+            for hash in manifest.values() {
+                if !live.has_blob(hash)? && old.has_blob(hash)? {
+                    carry.push(old.blob(hash)?);
                 }
+            }
+        }
+        let earlier = source.map(|(_, _, message)| message);
+        remove_db(&ppath);
+        if manifest == head_manifest {
+            // Nothing differs from live: there is no pending change to keep.
+            return Ok(json!({
+                "pending": false,
+                "base": live_ck,
+                "note": "the files are the same as live, so there is no pending change and no preview",
+            }));
+        }
+        live.clone_to(&ppath)?;
+        let p = Store::open(&ppath)?;
+        p.set_meta("preview_base", &live_ck)?;
+        for b in &carry {
+            p.put_blob(b)?;
+        }
+        let build = |st: &Store| -> Result<Manifest> {
+            for bytes in pending.values() {
                 st.put_blob(bytes)?;
             }
             Ok(manifest.clone())
         };
-        let id = commit_checkin(&p, Some(&head), build, &a.message)?;
+        let message = match earlier {
+            Some(e) => format!("{e}; {}", a.message),
+            None => a.message.clone(),
+        };
+        let id = commit_checkin(&p, Some(&live_ck), build, &message)?;
         drop(p);
         // Build: load the module graph and run the constructor on the preview,
         // which is where the code creates or changes its tables.
@@ -506,12 +547,15 @@ impl Tools {
             "tests": tests,
             "checkin": id,
             "base": live_ck,
-            "stacked_on_previous_preview": stack,
+            "pending": true,
+            "message": message,
+            "continues_pending_change": continues,
+            "discarded_stale_change": discarded_stale,
             "from_checkin": from,
             "files_changed": changed,
             "schema": schema,
             "build": match &built { Ok(()) => json!({ "ok": true }), Err(e) => json!({ "ok": false, "error": e.to_string() }) },
-            "next": if built.is_err() { "fix the build error with another propose_change. A failed constructor left the preview's data as it was; if a schema step that already ran needs changing, propose with restart: true" } else if !tests_ok { "fix the failing tests with another propose_change; release_change is refused while they fail" } else { "try it with read_object and call_object (target preview), then release_change" },
+            "next": if built.is_err() { "fix the build error with another propose_change" } else if !tests_ok { "fix the failing tests with another propose_change; release_change is refused while they fail" } else { "try it with read_object and call_object (target preview), then release_change" },
         }))
     }
 
@@ -646,7 +690,7 @@ impl Tools {
         let p = self.preview_store()?.ok_or_else(|| anyhow!("there is nothing to release; propose_change first"))?;
         let base = p.meta("preview_base")?;
         if base.as_deref() != Some(live_ck.as_str()) {
-            bail!("the live check-in moved since this preview was made; propose again with restart: true");
+            bail!("the live check-in moved since this preview was made; propose the change again");
         }
         let head = p.live_checkin()?;
         if head == live_ck {
@@ -673,20 +717,14 @@ impl Tools {
                 );
             }
         }
-        // Walk the preview chain head -> base.
-        let mut chain = vec![];
-        let mut cur = head.clone();
-        while cur != live_ck {
-            let ck = p.checkin(&cur)?;
-            chain.push(ck.clone());
-            cur = ck.parent.ok_or_else(|| anyhow!("preview chain does not reach the live check-in"))?;
+        // The preview holds one pending check-in on top of live.
+        let ck = p.checkin(&head)?;
+        if ck.parent.as_deref() != Some(live_ck.as_str()) {
+            bail!("the preview is not based on the live check-in; propose the change again");
         }
-        chain.reverse();
-        let manifest = p.manifest_at(&head)?;
+        let manifest = ck.manifest;
         let live_manifest = live.manifest_at(&live_ck)?;
-        let msg = message.unwrap_or_else(|| {
-            chain.iter().map(|c| c.message.as_str()).collect::<Vec<_>>().join("; ")
-        });
+        let msg = message.unwrap_or(ck.message);
         // Copy across only the files live does not already have, by hash.
         let build = |st: &Store| -> Result<Manifest> {
             for (path, hash) in &manifest {
@@ -715,7 +753,7 @@ impl Tools {
         if let Err(e) = started {
             live.set_meta("live_checkin", &live_ck)?;
             live.with_mode(Mode::Privileged, |c| c.execute("DELETE FROM _perch_checkins WHERE id=?", [&id]))?;
-            bail!("release undone; live is unchanged. The new code did not start on the live data (it did on the preview's copy, so live data has changed since): {e:#}\nPropose again with restart: true to rebuild the preview from live.");
+            bail!("release undone; live is unchanged. The new code did not start on the live data (it did on the preview's copy, so live data has changed since): {e:#}\nPropose the change again: the preview is rebuilt from live each time.");
         }
         drop(p);
         self.preview = None;
@@ -724,7 +762,6 @@ impl Tools {
             "released": id,
             "previous": live_ck,
             "message": msg,
-            "squashed_preview_checkins": chain.len(),
             "schema": live.schema()?,
         }))
     }
@@ -849,7 +886,7 @@ impl Tools {
         let live_ck = live.live_checkin()?;
         if let Some(p) = self.preview_store()? {
             if p.meta("preview_base")?.as_deref() == Some(live_ck.as_str()) {
-                bail!("there is an unreleased preview; release it (or discard it with propose_change restart: true) before importing, because an import moves the live check-in");
+                bail!("there is an unreleased preview; release it (or discard it with propose_change from_checkin: \"live\") before importing, because an import moves the live check-in");
             }
         }
         let base = live.manifest_at(&live_ck)?;

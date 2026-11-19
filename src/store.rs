@@ -541,18 +541,42 @@ impl Store {
         })?)
     }
 
-    /// Copy the whole file (data included) to `dest` with SQLite's backup API.
-    pub fn backup_to(&self, dest: &Path) -> Result<()> {
+    pub fn has_blob(&self, hash: &str) -> Result<bool> {
+        Ok(self.with_mode(Mode::Privileged, |c| {
+            c.query_row("SELECT 1 FROM _perch_blobs WHERE hash=?", [hash], |_| Ok(())).optional()
+        })?
+        .is_some())
+    }
+
+    /// Copy the whole file (data included) to `dest`. On APFS, btrfs and XFS
+    /// the copy is a copy-on-write clone: instant, and it shares every
+    /// unchanged page with the original, however large the file. The WAL is
+    /// folded in first and writers are held off while the file is copied, so
+    /// the main file alone is the whole object.
+    pub fn clone_to(&self, dest: &Path) -> Result<()> {
         for ext in ["", "-wal", "-shm"] {
             let p = PathBuf::from(format!("{}{}", dest.display(), ext));
             if p.exists() {
                 std::fs::remove_file(&p)?;
             }
         }
-        self.with_mode(Mode::Privileged, |c| {
-            c.backup(rusqlite::MAIN_DB, dest, None::<fn(rusqlite::backup::Progress)>)
-        })?;
-        Ok(())
+        let wal = PathBuf::from(format!("{}-wal", self.path.display()));
+        for _ in 0..100 {
+            let copied = self.with_mode(Mode::Privileged, |c| -> Result<bool> {
+                c.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))?;
+                c.execute_batch("BEGIN IMMEDIATE")?;
+                let folded = std::fs::metadata(&wal).map(|m| m.len() == 0).unwrap_or(true);
+                let r = if folded { std::fs::copy(&self.path, dest).map(|_| true) } else { Ok(false) };
+                c.execute_batch("ROLLBACK")?;
+                Ok(r?)
+            })?;
+            if copied {
+                return Ok(());
+            }
+            // A reader held the WAL open; let it finish.
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        bail!("could not copy {}: another process kept it busy", self.path.display())
     }
 }
 

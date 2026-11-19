@@ -32,7 +32,8 @@ enum Cmd {
     /// Create a new object file (an empty class, or code from a directory)
     New {
         file: PathBuf,
-        /// Class name exported by src/index.ts
+        /// Class name exported by src/index.ts (default: the class found there,
+        /// or one named after the file for a new empty object)
         #[arg(long)]
         class: Option<String>,
         /// Object name (defaults to the file name)
@@ -62,22 +63,13 @@ enum Cmd {
     Mcp { file: PathBuf },
     /// Print the object's description as JSON
     Describe { file: PathBuf },
-    /// Call an RPC method on the live object
+    /// Call a public method on the live object
     Call {
         file: PathBuf,
         method: String,
         /// JSON array of arguments
         #[arg(default_value = "[]")]
         args: String,
-    },
-    /// Send one HTTP request to the live object's fetch()
-    Fetch {
-        file: PathBuf,
-        path: String,
-        #[arg(short = 'X', long, default_value = "GET")]
-        method: String,
-        #[arg(short = 'd', long)]
-        data: Option<String>,
     },
     /// Write the live code as a Wrangler project for Cloudflare
     Export {
@@ -113,6 +105,19 @@ fn pascal(s: &str) -> String {
             c.next().map(|f| f.to_ascii_uppercase().to_string() + c.as_str()).unwrap_or_default()
         })
         .collect()
+}
+
+/// The Durable Object class an entry file exports, when there is exactly one.
+fn exported_class(source: &str) -> Option<String> {
+    let mut found = vec![];
+    for part in source.split("export class ").skip(1) {
+        let name: String = part.chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '$').collect();
+        let rest = part[name.len()..].trim_start();
+        if !name.is_empty() && rest.starts_with("extends DurableObject") {
+            found.push(name);
+        }
+    }
+    if found.len() == 1 { found.pop() } else { None }
 }
 
 fn starter(class: &str) -> String {
@@ -181,10 +186,15 @@ fn main() -> Result<()> {
         Cmd::New { file, class, name, from, .. } => {
             let stem = file.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "object".into());
             let name = name.unwrap_or_else(|| stem.clone());
-            let class = class.unwrap_or_else(|| {
-                let p = pascal(&stem);
-                if p.is_empty() || p.starts_with(|c: char| c.is_ascii_digit()) { "Obj".into() } else { p }
-            });
+            let from_file = from.as_ref().and_then(|d| std::fs::read_to_string(d.join("src/index.ts")).ok()).and_then(|s| exported_class(&s));
+            let class = match (class, from_file, &from) {
+                (Some(c), _, _) | (None, Some(c), _) => c,
+                (None, None, Some(d)) => bail!("{}/src/index.ts does not export exactly one class extending DurableObject; name it with --class", d.display()),
+                (None, None, None) => {
+                    let p = pascal(&stem);
+                    if p.is_empty() || p.starts_with(|c: char| c.is_ascii_digit()) { "Obj".into() } else { p }
+                }
+            };
             let mut files = BTreeMap::new();
             let mut public_dir: Option<PathBuf> = None;
             let msg;
@@ -235,15 +245,6 @@ fn main() -> Result<()> {
             let args = match args { Value::Array(a) => a, v => vec![v] };
             let mut t = Tools::new(file)?;
             let v = t.call_object(CallArgs { kind: "rpc".into(), method: Some(method), args, ..Default::default() }, None).await?;
-            print(&v);
-            Ok(())
-        })?,
-        Cmd::Fetch { file, path, method, data } => local(async move {
-            let mut t = Tools::new(file)?;
-            let body = data.map(|d| serde_json::from_str::<Value>(&d).unwrap_or(Value::String(d)));
-            let v = t
-                .call_object(CallArgs { kind: "fetch".into(), path: Some(path), http_method: Some(method), body, allow_safe: true, ..Default::default() }, None)
-                .await?;
             print(&v);
             Ok(())
         })?,
