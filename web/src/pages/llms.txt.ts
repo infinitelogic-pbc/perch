@@ -11,20 +11,22 @@ export const GET: APIRoute = ({ site }) => {
 > runs the object locally, exposes it to agents over MCP, and exports it to
 > Cloudflare with the class source unchanged.
 
-Version 0.1.0. File format_version 2, api_version perch-v0. The format is still moving: perch reads only the current version and does not convert older files.
+Version 0.1.0. File format_version 3. The format is still moving: perch reads only the current version. Format 2 files convert with a separate script, tools/v2-to-v3.ts.
 
 ## The file
 
 An object file is a plain SQLite database. Tables named \`_perch_*\` are
 reserved for the runtime; every other table is the object's own data, created
-only by migrations and reached by object code through \`ctx.storage.sql\`.
+and changed by the object's own code through \`ctx.storage.sql\`.
 
 ${RESERVED.map((t) => `- \`${t.name}\` (${t.columns}): ${t.detail}`).join('\n')}
 
-Data table rules: every table needs a declared PRIMARY KEY; AUTOINCREMENT is
-refused; use UUIDv7 TEXT keys (build v7 from Date.now() plus
-crypto.getRandomValues; crypto.randomUUID() is v4). Migrations are ordered,
-named, forward-only SQL.
+Schema belongs to the code, exactly as on Cloudflare: the class creates and
+changes its tables in its constructor. perch has no migration system. The
+usual pattern: one file per step (\`migrations/0001_name.sql\`), imported as
+text, and a constructor that runs the steps a \`schema_steps\` table does not
+list yet, inside \`ctx.storage.transactionSync\`. Never edit a released step;
+add a new one. A constructor that throws is rolled back.
 
 Preview: propose_change works on a sibling copy, \`<file>.preview\`.
 
@@ -33,13 +35,14 @@ Preview: propose_change works on a sibling copy, \`<file>.preview\`.
 - Entry file \`src/index.ts\` exports the class named in \`_perch_meta.class\`,
   extending \`DurableObject\` from "cloudflare:workers". Constructor is
   (ctx, env); call super(ctx, env).
-- Single-threaded; each event (fetch, RPC, alarm) is one SQLite transaction.
+- Single-threaded; each event (constructor, fetch, method call, alarm) is one
+  SQLite transaction.
 ${RUNTIME.map((r) => `- ${r.api}: ${r.note}`).join('\n')}
 - Globals: Request, Response, Headers, URL, URLSearchParams, TextEncoder,
   TextDecoder, crypto.randomUUID, crypto.getRandomValues, setTimeout,
   structuredClone, atob, btoa, console.
 - A SQLite authorizer refuses, from object code: any access to \`_perch_*\`
-  tables, DDL (CREATE/ALTER/DROP), BEGIN/COMMIT/SAVEPOINT, ATTACH, and all
+  tables (reading, writing or schema), BEGIN/COMMIT/SAVEPOINT, ATTACH, and all
   pragmas except read-only introspection (table_info, table_xinfo,
   table_list, index_list, index_info, index_xinfo, foreign_key_list).
 - Keep the class Cloudflare-compatible: \`perch export\` deploys the same source.
@@ -63,33 +66,33 @@ ${RUNTIME.map((r) => `- ${r.api}: ${r.note}`).join('\n')}
   the class never loads them, and listings count them instead of naming them.
   Cloudflare allows 20,000 static files per Worker version on Free and 100,000
   on Paid; export warns above either.
-- \`POST /.perch/rpc/<method>\` with a JSON array body calls a public method and
-  returns \`{"result": ...}\`. constructor, fetch, alarm, ctx, env and
-  names starting with \`_\` are not RPC.
+- Public methods are not reachable over HTTP. They are called from the shell
+  (\`perch call\`), the MCP tools and stored tests. Give a page a route in
+  fetch(). constructor, fetch, alarm, ctx, env and names starting with \`_\`
+  are not callable.
 
 ## MCP (\`perch mcp <file>\`, stdio, JSON-RPC 2.0, one message per line)
 
-Workflow: describe_object, read_code, propose_change (code + tests +
-migrations on the preview; stored tests run), read_object and test_call
-(reads and writes on the preview), release_change (live; refused while a
-stored test fails). rollback_code moves code back if it still fits the
-schema. read_object reads live;
+Workflow: describe_object, read_code, propose_change (code and tests on the
+preview; the constructor and the stored tests run), read_object and
+call_object with target "preview" (reads and writes on the preview),
+release_change (live; refused while a stored test fails). To go back to
+earlier code, propose_change with from_checkin. read_object reads live;
 call_object writes to it.
 
 ${TOOLS.map((t) => `- \`${t.name}\` [${t.kind}]: ${t.does}`).join('\n')}
 
 Annotations follow Anthropic's connector directory rules: every tool has a
 title and exactly one of readOnlyHint or destructiveHint. Read-only:
-describe_object, read_code, list_checkins, query_data, read_object, run_tests.
-Destructive (anything that modifies data, the preview copy
-included): propose_change, test_call, release_change,
-rollback_code, call_object, import_files.
+describe_object, read_code, query_data, read_object. Destructive (anything
+that modifies data, the preview copy included): propose_change, call_object,
+release_change, import_files.
 
-Reads and writes are separate tools. read_object takes GET or HEAD (or an RPC
-method) on live or the preview, and the runtime refuses any SQL write,
-key-value write or alarm change made during it. test_call (preview) and
-call_object (live) take POST, PUT, PATCH or DELETE, or an RPC method;
-test_call also takes kind alarm.
+Reads and writes are separate tools. read_object takes GET or HEAD (or a
+public method) on live or the preview, and the runtime refuses any SQL write,
+key-value write or alarm change made during it. call_object takes POST, PUT,
+PATCH or DELETE, or a public method, on live or the preview; on the preview
+it also takes kind alarm.
 
 Edits: propose_change takes \`edits: [{ path, old, new, replace_all? }]\`.
 \`old\` must match the file exactly and occur once. Use these after the first
@@ -110,10 +113,9 @@ Example client config: \`claude mcp add todo -- perch mcp todo.perch\`
 
 ${COMMANDS.map((c) => `- \`${c.usage}\`: ${c.does}`).join('\n')}
 
-\`perch export\` writes \`src/**\` byte for byte, \`perch/worker.js\` (a wrapper
-that applies migrations once per object, tracked in \`_perch_migrations\`, and
-serves the RPC route), \`perch/migrations.js\` and \`wrangler.jsonc\` with one
-SQLite-backed Durable Object binding. Deploy with \`bunx wrangler deploy\`.
+\`perch export\` writes every file byte for byte, \`perch/worker.js\` (a few
+lines: it re-exports the class and routes each request to the object's
+fetch()) and \`wrangler.jsonc\` with one SQLite-backed Durable Object binding. Deploy with \`bunx wrangler deploy\`.
 
 ## Out of scope in v0
 

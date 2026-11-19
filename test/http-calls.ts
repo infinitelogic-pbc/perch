@@ -16,14 +16,11 @@ function ok(cond: unknown, what: string) {
   n++;
   console.log(`ok   ${what}`);
 }
-const rpc = async (m: string, ...args: unknown[]) => {
-  const r = await fetch(`${base}/.perch/rpc/${m}`, { method: "POST", body: JSON.stringify(args) });
-  return { status: r.status, body: (await r.json()) as any };
-};
+const stats = async () => (await (await fetch(`${base}/api/stats`)).json()) as any;
 const json = { "content-type": "application/json" };
 
-const before = (await rpc("stats")).body.result;
-ok(typeof before.total === "number", `RPC stats (${before.total} items to start)`);
+const before = await stats();
+ok(typeof before.total === "number", `GET /api/stats (${before.total} items to start)`);
 
 let r = await fetch(`${base}/todos`, { method: "POST", headers: json, body: JSON.stringify({ title: "conformance" }) });
 const t = await r.json();
@@ -37,23 +34,23 @@ r = await fetch(`${base}/todos?done=1`);
 ok((await r.json()).some((x: any) => x.id === t.id), "GET ?done=1 lists it");
 r = await fetch(`${base}/nope`);
 ok(r.status === 404, "unknown path is a 404");
-const added = (await rpc("add", "via rpc")).body.result;
-ok(added.title === "via rpc", "RPC add");
-const mid = (await rpc("stats")).body.result;
-ok(mid.total === before.total + 2 && mid.done >= 1, "RPC stats sees both");
-ok((await rpc("constructor")).status === 500, "constructor is not RPC");
+r = await fetch(`${base}/todos`, { method: "POST", headers: json, body: JSON.stringify({ title: "second" }) });
+const added = (await r.json()) as any;
+const mid = await stats();
+ok(mid.total === before.total + 2 && mid.done >= 1, "stats sees both");
+r = await fetch(`${base}/.perch/rpc/stats`, { method: "POST", body: "[]" });
+ok(r.status === 404, "methods are not reachable over HTTP");
 
 // Alarm: drop done items now.
-await rpc("setRetention", 0);
-await rpc("scheduleCleanup", 500);
+await fetch(`${base}/api/cleanup`, { method: "POST", headers: json, body: JSON.stringify({ retentionMs: 0, inMs: 500 }) });
 let after: any;
 for (let i = 0; i < 30; i++) {
   await Bun.sleep(500);
-  after = (await rpc("stats")).body.result;
+  after = await stats();
   if (after.lastCleanup && after.done === 0) break;
 }
 ok(after.done === 0 && after.lastCleanup, "alarm fired and removed the done items");
-await rpc("setRetention", 24 * 60 * 60 * 1000);
+await fetch(`${base}/api/cleanup`, { method: "POST", headers: json, body: JSON.stringify({ retentionMs: 24 * 60 * 60 * 1000 }) });
 
 r = await fetch(`${base}/todos/${added.id}`, { method: "DELETE" });
 ok(r.status === 204, "DELETE /todos/:id");

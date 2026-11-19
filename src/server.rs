@@ -1,16 +1,15 @@
-//! `perch run`: serve one object over HTTP. Every request goes to fetch();
-//! `POST /.perch/rpc/<method>` with a JSON array body calls a public method.
+//! `perch run`: serve one object over HTTP. Static files first, then every
+//! request goes to the class's fetch(). Methods are not reachable over HTTP:
+//! as on Cloudflare, only what fetch() routes is public.
 
 use std::net::SocketAddr;
 
 use anyhow::Result;
 use axum::Router;
-use axum::body::{Body, Bytes};
-use axum::extract::{Path, Request, State};
+use axum::body::Body;
+use axum::extract::{Request, State};
 use axum::http::{HeaderName, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::post;
-use serde_json::{Value, json};
 
 use crate::host::{Event, HostHandle};
 
@@ -56,28 +55,8 @@ async fn fetch(State(h): State<HostHandle>, req: Request) -> Response {
     }
 }
 
-async fn rpc(State(h): State<HostHandle>, Path(method): Path<String>, body: Bytes) -> Response {
-    let args: Vec<Value> = if body.is_empty() {
-        vec![]
-    } else {
-        match serde_json::from_slice::<Value>(&body) {
-            Ok(Value::Array(a)) => a,
-            Ok(other) => vec![other],
-            Err(e) => {
-                return (StatusCode::BAD_REQUEST, axum::Json(json!({ "error": format!("body must be a JSON array of arguments: {e}") }))).into_response();
-            }
-        }
-    };
-    match h.send(Event::Rpc { method, args }).await {
-        Ok(o) if o.ok => axum::Json(json!({ "result": o.result })).into_response(),
-        Ok(o) => (StatusCode::INTERNAL_SERVER_ERROR, axum::Json(json!({ "error": o.error }))).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, axum::Json(json!({ "error": format!("{e:#}") }))).into_response(),
-    }
-}
-
 pub async fn serve(h: HostHandle, addr: SocketAddr) -> Result<()> {
     let app = Router::new()
-        .route("/.perch/rpc/{method}", post(rpc))
         .fallback(fetch)
         .with_state(h);
     let listener = tokio::net::TcpListener::bind(addr).await?;

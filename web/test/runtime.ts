@@ -57,7 +57,8 @@ const call = async (method: string, path: string, body?: unknown, headers: [stri
   try { json = JSON.parse(text); } catch {}
   return { ...res, text, json, header: (k: string) => res.headers.find(([h]) => h === k)?.[1] };
 };
-const rpc = async (m: string, ...args: unknown[]) => (await call("POST", `/.perch/rpc/${m}`, args)).json;
+// Methods are called in-process; over HTTP only fetch() routes exist.
+const rpc = async (m: string, ...args: unknown[]) => (await rt.rpc(m, args)) as any;
 
 // Static files, with the Cloudflare rules.
 let r = await call("GET", "/");
@@ -80,8 +81,12 @@ ok(r.status === 400, "validation still returns 400");
 r = await call("PATCH", `/todos/${made.id}`, { done: true });
 ok(r.json.done === 1, "PATCH marks done");
 let stats = (await rpc("stats")).result;
-ok(stats.total === 2 && stats.done === 1, "RPC over /.perch/rpc returns the right data");
-ok((await call("POST", "/.perch/rpc/constructor", [])).status === 500, "constructor is not RPC");
+ok(stats.total === 2 && stats.done === 1, "a method call returns the right data");
+ok("error" in (await rpc("constructor")), "constructor is not RPC");
+r = await call("GET", "/api/stats");
+ok(r.status === 200 && r.json.total === 2, "a route the class defines serves the same data over HTTP");
+r = await call("POST", "/.perch/rpc/stats", []);
+ok(r.status === 404, "methods are not reachable over HTTP");
 r = await call("GET", "/stats");
 ok(r.status === 200 && r.text.includes("<td>Total</td><td>2</td>"), "a page renders from an imported .html template");
 
@@ -110,22 +115,27 @@ rt.close();
 const seed = join(dir, "probe");
 await Bun.write(join(seed, "src/index.ts"), `import { DurableObject } from "cloudflare:workers";
 import { helper } from "./lib/helper";
+import step from "../migrations/0001.sql";
 export class Probe extends DurableObject {
   run(q: string) { try { this.ctx.storage.sql.exec(q); return "allowed"; } catch (e: any) { return String(e.message || e); } }
+  constructor(ctx: any, env: any) { super(ctx, env); ctx.storage.sql.exec(step); }
   ok() { return helper(this.ctx.storage.sql.exec("SELECT count(*) AS n FROM notes").one().n as number); }
 }
 `);
 await Bun.write(join(seed, "src/lib/helper.ts"), `export const helper = (n: number): string => "notes:" + n;\n`);
-await Bun.write(join(seed, "migrations/0001.sql"), "CREATE TABLE notes (id TEXT PRIMARY KEY, body TEXT);");
+await Bun.write(join(seed, "migrations/0001.sql"), "CREATE TABLE IF NOT EXISTS notes (id TEXT PRIMARY KEY, body TEXT); CREATE INDEX IF NOT EXISTS notes_body ON notes (body);");
 const probeFile = join(dir, "probe.perch");
 sh(["new", probeFile, "--class", "Probe", "--from", seed]);
 const p = await ObjRuntime.open(new Uint8Array(readFileSync(probeFile)), { sqlite3, bootstrap, toUrl });
-ok(!p.loadError && (await p.rpc("ok", []) as any).result === "notes:0", "a second object loads, with a nested relative import");
-for (const q of ["SELECT * FROM _perch_meta", "UPDATE _perch_checkins SET message = 'x'", "DELETE FROM _perch_kv", "DROP TABLE notes", "CREATE TABLE sneaky (id TEXT PRIMARY KEY)", "BEGIN", "ATTACH DATABASE ':memory:' AS x", "PRAGMA journal_mode = DELETE"]) {
+ok(!p.loadError && (await p.rpc("ok", []) as any).result === "notes:0", "a second object loads, with a nested relative import, and builds its own tables from an imported .sql file");
+for (const q of ["SELECT * FROM _perch_meta", "UPDATE _perch_checkins SET message = 'x'", "DELETE FROM _perch_kv", "DROP TABLE _perch_kv", "CREATE TABLE _perch_sneaky (id TEXT PRIMARY KEY)", "CREATE INDEX sneaky ON _perch_blobs (size)", "BEGIN", "ATTACH DATABASE ':memory:' AS x", "PRAGMA journal_mode = DELETE"]) {
   const res = (await p.rpc("run", [q]) as any).result as string;
   ok(res !== "allowed" && /not authorized|prohibited|SQLITE_AUTH/i.test(res), `object code refused in the browser runtime: ${q}`);
 }
 ok((await p.rpc("run", ["INSERT INTO notes VALUES ('a', 'b')"]) as any).result === "allowed", "ordinary writes to data tables are allowed");
+for (const q of ["CREATE TABLE scratch (id INTEGER PRIMARY KEY AUTOINCREMENT, v TEXT)", "CREATE INDEX scratch_v ON scratch (v)", "ALTER TABLE scratch ADD COLUMN w TEXT", "DROP TABLE scratch"]) {
+  ok((await p.rpc("run", [q]) as any).result === "allowed", `object code may change its own schema in the browser runtime: ${q}`);
+}
 
 console.log(`\n${n} checks passed (${dir})`);
 process.exit(0);

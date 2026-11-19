@@ -83,14 +83,14 @@ ok((await page.$eval("#path", (e) => (e as HTMLInputElement).value)) === "/stats
 // Clean URLs and the cage.
 const probe = await frame.evaluate(async () => {
   const r = await fetch("/index.html", { redirect: "manual" });
-  const rpc = await (await fetch("/.perch/rpc/stats", { method: "POST", body: "[]" })).json();
+  const api = await (await fetch("/api/stats")).json();
   const css = await fetch("/app.css");
   let outside = "allowed";
   try { await fetch("https://example.com/"); } catch { outside = "blocked"; }
-  return { redirect: r.type === "opaqueredirect" || r.status === 307, rpc: rpc.result?.total, csp: css.headers.get("content-security-policy"), etag: css.headers.get("etag"), outside };
+  return { redirect: r.type === "opaqueredirect" || r.status === 307, api: api.total, csp: css.headers.get("content-security-policy"), etag: css.headers.get("etag"), outside };
 });
 ok(probe.redirect, "/index.html redirects, as on Cloudflare");
-ok(probe.rpc === 3, "RPC over /.perch/rpc works from the page");
+ok(probe.api === 3, "the page reaches the object through a route its class defines");
 ok(probe.etag && probe.csp?.includes("default-src 'self'"), "responses carry the ETag and the content security policy");
 ok(probe.outside === "blocked", "the object's page cannot fetch another site");
 

@@ -127,26 +127,27 @@ struct SqlResult {
     rows_written: u64,
 }
 
-/// Execute SQL in whatever mode is current (sandbox for object code).
+/// Execute SQL in whatever mode is current (sandbox for object code). As on
+/// Cloudflare, `query` may hold several statements separated by semicolons;
+/// they run in order, each one prepared after the one before it has run (a
+/// schema step creates a table and then indexes it). Bindings go to the
+/// statement that has placeholders, and the last statement's rows come back.
 pub fn exec_sql(conn: &Connection, query: &str, params: &[Value]) -> Result<(Vec<String>, Vec<Vec<Value>>, u64), JsErrorBox> {
     let bound: Vec<SqlValue> = params.iter().map(json_to_sql).collect::<Result<_, _>>()?;
     let before = conn.total_changes();
-    let mut stmt = match conn.prepare(query) {
-        Ok(s) => s,
-        Err(rusqlite::Error::MultipleStatement) if bound.is_empty() => {
-            conn.execute_batch(query).map_err(err)?;
-            let written = conn.total_changes() - before;
-            return Ok((vec![], vec![], written));
-        }
-        Err(e) => return Err(err(e)),
-    };
-    let columns: Vec<String> = stmt.column_names().map(|s| s.to_string()).collect();
-    let n = columns.len();
-    let mut rows = Vec::new();
-    {
-        let mut q = stmt
-            .query(rusqlite::params_from_iter(bound.iter()))
-            .map_err(err)?;
+    use fallible_iterator::FallibleIterator;
+    let mut batch = rusqlite::Batch::new(conn, query);
+    let (mut columns, mut rows, mut used) = (Vec::new(), Vec::new(), bound.is_empty());
+    while let Some(mut stmt) = batch.next().map_err(err)? {
+        columns = stmt.column_names().map(|s| s.to_string()).collect();
+        let n = columns.len();
+        rows = Vec::new();
+        let mut q = if stmt.parameter_count() > 0 {
+            used = true;
+            stmt.query(rusqlite::params_from_iter(bound.iter())).map_err(err)?
+        } else {
+            stmt.query([]).map_err(err)?
+        };
         while let Some(row) = q.next().map_err(err)? {
             let mut out = Vec::with_capacity(n);
             for i in 0..n {
@@ -154,6 +155,9 @@ pub fn exec_sql(conn: &Connection, query: &str, params: &[Value]) -> Result<(Vec
             }
             rows.push(out);
         }
+    }
+    if !used {
+        return Err(JsErrorBox::generic(format!("{} bindings were given, but the SQL has no ? placeholders", bound.len())));
     }
     let written = conn.total_changes() - before;
     Ok((columns, rows, written))

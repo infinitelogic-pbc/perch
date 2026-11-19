@@ -4,7 +4,7 @@ import { RESERVED } from '../lib/facts';
 ---
 <Base
   title="The format: perch"
-  description="Inside a portable durable object file: the reserved _perch_ tables that hold code, history, migrations, KV and the alarm, and the data tables that belong to the object."
+  description="Inside a portable durable object file: the reserved _perch_ tables that hold code, history, KV and the alarm, and the data tables that belong to the object."
 >
   <div class="wrap head stack">
     <p class="eyebrow">Format version 1 · api perch-v0</p>
@@ -44,14 +44,15 @@ import { RESERVED } from '../lib/facts';
       <div class="stack">
         <h2>The object’s half</h2>
         <p>
-          Data tables are created by migrations and nothing else. Object code reaches them through
-          <code>ctx.storage.sql.exec</code>; agents read them with <code>query_data</code>.
+          Every table that is not <code>_perch_</code> belongs to the object’s code, schema
+          included. The class creates and changes its tables in its constructor, as a Durable
+          Object does on Cloudflare; agents read them with <code>query_data</code>.
         </p>
       </div>
       <div class="stack rules">
-        <p><strong>A declared PRIMARY KEY on every table.</strong> A migration that creates one without is refused.</p>
-        <p><strong>No AUTOINCREMENT.</strong> Use UUIDv7 text keys, so two copies of a file never mint the same key. The to-do example ships a 14-line <code>uuidv7()</code>.</p>
-        <p><strong>Forward only.</strong> Migrations run in order, are recorded with the check-in that brought them, and are never undone.</p>
+        <p><strong>Steps in files.</strong> Each schema change is a file, <code>migrations/0001_name.sql</code>, imported as text. The constructor runs the ones a small <code>schema_steps</code> table does not list yet.</p>
+        <p><strong>Tried on a copy first.</strong> The preview is a copy of the live data, so a step that fails on real rows fails there.</p>
+        <p><strong>All or nothing.</strong> A constructor that throws is rolled back, and a release whose code does not start on live is undone.</p>
       </div>
     </div>
   </section>
@@ -65,10 +66,9 @@ import { RESERVED } from '../lib/facts';
           the SHA-256 of those. <code>_perch_meta.live_checkin</code> names the one that runs.
         </p>
         <p>
-          Releasing writes one squashed check-in, runs its migrations and moves
-          <code>live_checkin</code>, all in one transaction. Rolling back moves
-          <code>live_checkin</code> to an older check-in after comparing the schema it was released
-          against with the tables as they are now.
+          Releasing writes one squashed check-in, moves <code>live_checkin</code> and starts the
+          new code. Rolling back is a proposal that starts from an older check-in’s files, so it
+          goes through the preview and the tests like any other change.
         </p>
       </div>
       <pre><span class="c">-- what runs</span>
@@ -88,10 +88,10 @@ SELECT data FROM _perch_blobs WHERE hash = '9f2c…';</pre>
         <h2>The preview copy</h2>
         <p>
           <code>propose_change</code> copies the live file to <code>&lt;file&gt;.preview</code>, data
-          included, and applies the change there. <code>test_call</code> and
-          <code>query_data</code> with <code>target: "preview"</code> work on that copy.
-          <code>release_change</code> replays the migrations on the live file, and is refused if
-          live moved since the preview was made.
+          included, applies the change there and runs the constructor. <code>read_object</code>,
+          <code>call_object</code> and <code>query_data</code> with <code>target: "preview"</code>
+          work on that copy. <code>release_change</code> is refused if live moved since the preview
+          was made.
         </p>
       </div>
     </div>

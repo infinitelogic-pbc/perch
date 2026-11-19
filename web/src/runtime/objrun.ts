@@ -102,7 +102,7 @@ export class ObjRuntime {
     this.db.checkRc(rc);
     this.db.exec("PRAGMA foreign_keys = ON");
     const v = this.meta("format_version");
-    if (v !== "2") throw new Error(v ? `this file is format version ${v}; this runtime reads only version 2 (older files are not converted)` : "this SQLite file is not a portable object (no _perch_meta)");
+    if (v !== "3") throw new Error(v ? `this file is format version ${v}; this runtime reads only version 3 (older files are not converted)` : "this SQLite file is not a portable object (no _perch_meta)");
     const str = (x: any) => (typeof x === "number" ? (x ? wasm.cstrToJs(x) : null) : x ?? null);
     capi.sqlite3_set_authorizer(this.db.pointer, (_p: any, action: number, a1: any, a2: any, dbName: any) => {
       try {
@@ -119,18 +119,25 @@ export class ObjRuntime {
     const c = this.capi;
     if (dbName === "temp") return false;
     const reserved = (t: string | null) => !!t && t.startsWith("_perch_");
-    const internal = (t: string | null) => !!t && t.startsWith("sqlite_");
     switch (action) {
       case c.SQLITE_SELECT: case c.SQLITE_RECURSIVE: case c.SQLITE_FUNCTION:
         return true;
       case c.SQLITE_READ:
         return !reserved(a1);
       case c.SQLITE_INSERT: case c.SQLITE_DELETE: case c.SQLITE_UPDATE:
-        return !reserved(a1) && !internal(a1);
+        return !reserved(a1);
       case c.SQLITE_PRAGMA:
         return INTROSPECTION.has((a1 ?? "").toLowerCase());
+      // The object's code owns its schema, as on Cloudflare.
+      case c.SQLITE_CREATE_TABLE: case c.SQLITE_DROP_TABLE: case c.SQLITE_CREATE_VIEW: case c.SQLITE_DROP_VIEW:
+        return !reserved(a1);
+      case c.SQLITE_ALTER_TABLE:
+      case c.SQLITE_CREATE_INDEX: case c.SQLITE_DROP_INDEX: case c.SQLITE_CREATE_TRIGGER: case c.SQLITE_DROP_TRIGGER:
+        return !reserved(a2);
+      case c.SQLITE_REINDEX: case c.SQLITE_ANALYZE:
+        return true;
       default:
-        // DDL, BEGIN/COMMIT/SAVEPOINT, ATTACH, temp objects: never from object code.
+        // BEGIN/COMMIT/SAVEPOINT, ATTACH, temp objects: never from object code.
         return false;
     }
   }
@@ -229,8 +236,7 @@ export class ObjRuntime {
       if (!path.startsWith(PUBLIC_DIR)) files.set(path, this.blob(hash));
     }
     const toUrl: ToUrl = opts.toUrl ?? ((code) => URL.createObjectURL(new Blob([code], { type: "text/javascript" })));
-    const main = this.meta("main") ?? "src/index.ts";
-    const entry = await link(files, main, toUrl);
+    const entry = await link(files, "src/index.ts", toUrl);
     this.mode = Mode.Sandbox; // top-level module code is sandboxed too
     let mod: any;
     try {
@@ -284,8 +290,9 @@ export class ObjRuntime {
         const n = this.savepoint--;
         db.exec(`ROLLBACK TO perch_tx_${n}; RELEASE perch_tx_${n}`);
       }
-      // Writes made before a handler throws are kept, as on Cloudflare.
-      db.exec("COMMIT");
+      // Writes made before a handler throws are kept, as on Cloudflare. A
+      // constructor that throws leaves nothing behind (a schema step, say).
+      db.exec(ev.kind === "init" && !out.ok ? "ROLLBACK" : "COMMIT");
     } catch (e: any) {
       try { db.exec("ROLLBACK"); } catch {}
       return { ok: false, error: `runtime error: ${e?.message || e}` };
@@ -299,7 +306,6 @@ export class ObjRuntime {
   private asset(req: Req): Res | null {
     if (req.method !== "GET" && req.method !== "HEAD") return null;
     const u = new URL(req.url);
-    if (u.pathname.startsWith("/.perch/")) return null;
     const r = resolve((p) => p in this.manifest, decodePath(u.pathname));
     if (!r) return null;
     if ("redirect" in r) {
@@ -325,31 +331,17 @@ export class ObjRuntime {
     return { status, headers: [["content-type", "application/json"]], body: new TextEncoder().encode(JSON.stringify(value)) };
   }
 
-  /** Static files first, then `POST /.perch/rpc/<method>`, then the class's fetch(). */
+  /** Static files first, then the class's fetch(). Methods are not reachable over HTTP. */
   async fetch(req: Req): Promise<Res> {
     const a = this.asset(req);
     if (a) return a;
-    const u = new URL(req.url);
-    const m = u.pathname.match(/^\/\.perch\/rpc\/([^/]+)$/);
-    if (m && req.method === "POST") {
-      let args: unknown[] = [];
-      if (req.body?.length) {
-        try {
-          const v = JSON.parse(new TextDecoder().decode(req.body));
-          args = Array.isArray(v) ? v : [v];
-        } catch (e: any) {
-          return this.json(400, { error: `body must be a JSON array of arguments: ${e.message}` });
-        }
-      }
-      const r = await this.rpc(decodeURIComponent(m[1]), args);
-      return "error" in r ? this.json(500, { error: r.error }) : this.json(200, { result: r.result });
-    }
     if (this.loadError) return this.text(500, `${this.loadError}\n`);
     const out = await this.event({ kind: "fetch", method: req.method, url: req.url, headers: req.headers }, req.body);
     if (!out.ok) return this.text(500, `object threw: ${out.error}\n`);
     return { status: out.meta.status ?? 200, headers: out.meta.headers ?? [], body: out.body };
   }
 
+  /** Call a public method in-process (tests and tools; never from the network). */
   async rpc(method: string, args: unknown[]): Promise<{ result: unknown } | { error: string }> {
     if (this.loadError) return { error: this.loadError };
     const out = await this.event({ kind: "rpc", method, args });

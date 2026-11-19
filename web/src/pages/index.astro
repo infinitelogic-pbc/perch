@@ -9,21 +9,20 @@ const HEADER ='53 51 4c 69 74 65 20 66 6f 72 6d 61 74 20 33 00';
 const loop = [
   { tool: 'describe_object', note: 'what is here' },
   { tool: 'read_code', note: 'what runs' },
-  { tool: 'propose_change', note: 'code + migrations, on a preview copy' },
-  { tool: 'test_call', note: 'try it, see the rows it touched' },
-  { tool: 'release_change', note: 'one transaction, live moves' },
+  { tool: 'propose_change', note: 'code + tests, on a preview copy' },
+  { tool: 'call_object', note: 'try it on the preview' },
+  { tool: 'release_change', note: 'live moves, the new code starts' },
 ];
 
 const calls = [
-  'RPC stats',
+  'GET /api/stats',
   'POST /todos returns a UUIDv7 row',
   'POST without a title is a 400',
   'PATCH marks done',
   'GET ?done=1 lists it',
   'unknown path is a 404',
-  'RPC add',
-  'RPC stats sees both',
-  'constructor is not RPC',
+  'stats sees both',
+  'methods are not reachable over HTTP',
   'alarm fired and removed the done items',
   'DELETE /todos/:id',
   'GET / serves public/index.html',
@@ -70,6 +69,10 @@ const calls = [
           <span>object code stops here</span>
         </li>
         <li class="row data">
+          <code>schema_steps</code>
+          <span>name, applied_at</span>
+        </li>
+        <li class="row data">
           <code>todos</code>
           <span>id, title, done, created_at, done_at</span>
         </li>
@@ -79,7 +82,7 @@ const calls = [
         </li>
       </ul>
       <figcaption class="small">
-        The to-do example after its first migration. The hatched red rows are the runtime’s half; the green rows are yours,
+        The to-do example after its constructor has run. The hatched red rows are the runtime’s half; the green rows are yours,
         reached through <code>ctx.storage.sql</code>.
       </figcaption>
     </figure>
@@ -96,9 +99,9 @@ const calls = [
           <code>DurableObject</code> from <code>cloudflare:workers</code>.
         </p>
         <p>
-          A SQLite authorizer draws the line. Object code reads and writes its own tables and nothing
-          else: no <code>_perch_</code> tables, no DDL, no transactions, no ATTACH, no pragmas that change
-          anything. Schema changes arrive only as migrations.
+          A SQLite authorizer draws the line. Object code owns its own tables, schema included, as
+          on Cloudflare: the constructor creates and changes them. It gets no <code>_perch_</code>
+          tables, no transactions of its own, no ATTACH and no pragmas that change anything.
         </p>
       </div>
       <div class="stack">
@@ -139,8 +142,10 @@ const calls = [
         ))}
       </ol>
       <p class="rollback">
-        <code>rollback_code</code> moves the live check-in back. It moves code only, and it refuses
-        when the old code no longer fits the schema (say, a column it reads was renamed).
+        To go back, <code>propose_change</code> takes <code>from_checkin</code>: earlier code goes
+        through the same preview and tests as any change. Schema is the code’s own, so a new step
+        runs first on the preview’s copy of the data, and a release whose code does not start on
+        live is undone.
       </p>
       <div class="tools">
         {TOOLS.map((t) => (
@@ -181,16 +186,16 @@ const calls = [
         <div class="stack card inked">
           <h3>Export to Cloudflare</h3>
           <p>
-            <code>perch export</code> writes a Wrangler project. The class source is copied byte for
-            byte; a generated wrapper applies the migrations once and gives the same HTTP surface as
-            <code>perch run</code>, including <code>POST /.perch/rpc/&lt;method&gt;</code>.
+            <code>perch export</code> writes a Wrangler project. Every file is copied byte for byte,
+            schema steps included, and a generated Worker of a few lines routes each request to the
+            object’s <code>fetch()</code>. Nothing is wrapped or translated.
           </p>
           <pre><span class="p">$ </span>perch export todo.perch out/
 <span class="p">$ </span>cd out && bunx wrangler deploy</pre>
         </div>
       </div>
       <details class="calls">
-        <summary>The same {calls.length} HTTP calls pass on <code>perch run</code> and on Cloudflare</summary>
+        <summary>The same {calls.length} HTTP calls pass on <code>perch run</code> and on the export under Cloudflare’s runtime</summary>
         <ol>{calls.map((c) => <li>{c}</li>)}</ol>
       </details>
     </div>
@@ -219,7 +224,7 @@ const calls = [
 <span class="p">$ </span>claude mcp add hello -- perch mcp hello.perch
 <span class="p">$ </span>perch run hello.perch
 
-<span class="c"># or import a directory with src/ and migrations/</span>
+<span class="c"># or import a directory with src/, migrations/, test/ and public/</span>
 <span class="p">$ </span>perch new todo.perch --from examples/todo
 <span class="p">$ </span>perch call todo.perch add '["buy milk"]'
 <span class="p">$ </span>perch fetch todo.perch /todos

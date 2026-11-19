@@ -1,6 +1,6 @@
 // End-to-end check of the first deliverable: build the to-do object entirely
 // through the MCP tools, then serve it, fire its alarm, carry the file to
-// another directory, undo a bad release, and confirm the sandbox holds.
+// another directory, roll back a bad release, and confirm the sandbox holds.
 //
 //   bun test/e2e.ts            (after cargo build)
 
@@ -66,6 +66,8 @@ class Mcp {
 }
 
 const src = (p: string) => readFileSync(join(ROOT, "examples/todo", p), "utf8");
+// The to-do object's code: the class, its helpers, and its schema steps.
+const TODO = Object.fromEntries(["src/index.ts", "src/uuid.ts", "src/stats.html", "src/schema.ts", "migrations/0001_todos.sql"].map((p) => [p, src(p)]));
 
 // ------------------------------------------------------------------ build over MCP
 sh(["new", file, "--class", "Todo"]);
@@ -74,35 +76,35 @@ const init = await mcp.rpc("initialize", { protocolVersion: "2025-06-18", capabi
 ok(init.result.instructions.includes("propose_change"), "initialize returns the agent guide");
 const list = await mcp.rpc("tools/list");
 const names = list.result.tools.map((t: any) => t.name);
-ok(names.length === 12, `twelve tools (${names.join(", ")})`);
+ok(names.length === 8, `eight tools (${names.join(", ")})`);
 ok(list.result.tools.every((t: any) => t.title && t.annotations), "every tool has a title and annotations");
 const ann = Object.fromEntries(list.result.tools.map((t: any) => [t.name, t.annotations]));
 ok(list.result.tools.every((t: any) => (t.annotations.readOnlyHint === true) !== (t.annotations.destructiveHint === true)), "every tool is exactly one of readOnlyHint or destructiveHint");
-const READS = ["describe_object", "read_code", "list_checkins", "query_data", "read_object", "run_tests"];
-ok(names.every((n: string) => READS.includes(n) === (ann[n].readOnlyHint === true)) && names.every((n: string) => n.length <= 64), "the read-only set is the six read tools; names are within 64 characters");
+const READS = ["describe_object", "read_code", "query_data", "read_object"];
+ok(names.every((n: string) => READS.includes(n) === (ann[n].readOnlyHint === true)) && names.every((n: string) => n.length <= 64), "the read-only set is the four read tools; names are within 64 characters");
 const props = (n: string) => list.result.tools.find((t: any) => t.name === n).inputSchema.properties;
-ok(!props("call_object").http_method.enum.includes("GET") && !props("test_call").http_method.enum.includes("GET") && props("read_object").http_method.enum.join() === "GET,HEAD", "no tool accepts both safe and unsafe HTTP methods");
+ok(!props("call_object").http_method.enum.includes("GET") && props("read_object").http_method.enum.join() === "GET,HEAD", "no tool accepts both safe and unsafe HTTP methods");
 
-let r = await mcp.tool("propose_change", {
-  message: "to-do API with nightly cleanup",
-  files: { "src/index.ts": src("src/index.ts"), "src/uuid.ts": src("src/uuid.ts"), "src/stats.html": src("src/stats.html") },
-  migrations: [{ name: "0001_todos", sql: src("migrations/0001_todos.sql") }],
-});
+let r = await mcp.tool("propose_change", { message: "old habit", migrations: [{ name: "0001_todos", sql: src("migrations/0001_todos.sql") }] });
+ok(r.isError && r.text.includes("schema lives in the object's code"), "propose_change takes no migrations, and says where schema goes");
+r = await mcp.tool("propose_change", { message: "to-do API with nightly cleanup", files: TODO });
 ok(!r.isError && r.v.build.ok, `propose_change builds on the preview (${r.v.checkin?.slice(0, 12)})`);
-ok(r.v.schema.todos, "preview has the todos table");
+ok(r.v.schema.todos && r.v.schema.schema_steps, "the constructor built the tables on the preview");
 
-r = await mcp.tool("test_call", { kind: "fetch", http_method: "POST", path: "/todos", body: { title: "buy milk" } });
-ok(r.v.ok && r.v.status === 201 && r.v.json.title === "buy milk", "test_call POST /todos on preview");
-ok(r.v.changes.todos?.inserts === 1, "test_call reports the row it inserted");
-r = await mcp.tool("test_call", { kind: "rpc", method: "stats" });
-ok(r.v.result.total === 1, "test_call rpc stats on preview");
+r = await mcp.tool("call_object", { target: "preview", kind: "fetch", http_method: "POST", path: "/todos", body: { title: "buy milk" } });
+ok(r.v.ok && r.v.status === 201 && r.v.json.title === "buy milk" && r.v.target === "preview", "call_object POST /todos on the preview");
+ok(r.v.rows_written === 1, "a write call reports the rows it wrote");
+r = await mcp.tool("read_object", { target: "preview", kind: "rpc", method: "stats" });
+ok(r.v.result.total === 1, "read_object rpc stats on the preview");
 r = await mcp.tool("query_data", { sql: "SELECT count(*) AS n FROM todos" });
-ok(r.isError && r.text.includes("no such table"), "live is untouched: the migration only ran on the preview");
+ok(r.isError && r.text.includes("no such table"), "live is untouched: the schema was only built on the preview");
 r = await mcp.tool("query_data", { sql: "SELECT count(*) AS n FROM todos", target: "preview" });
 ok(r.v.rows[0][0] === 1, "query_data can read the preview");
 r = await mcp.tool("describe_object", { target: "preview" });
 ok(r.v.target === "preview" && r.v.next_alarm && r.v.tables.some((t: any) => t.name === "todos" && t.rows === 1), "describe_object can describe the preview, alarm included");
-r = await mcp.tool("test_call", { kind: "alarm" });
+r = await mcp.tool("call_object", { kind: "alarm" });
+ok(r.isError && r.text.includes("preview"), "an alarm is not run by hand on live");
+r = await mcp.tool("call_object", { target: "preview", kind: "alarm" });
 ok(r.v.ok && r.v.next_alarm && r.v.next_alarm.at_ms > Date.now() + 60_000, "a hand-run alarm that reschedules itself keeps its next alarm");
 
 // ------------------------------------------------------------------ the sandbox
@@ -119,33 +121,33 @@ for (const q of [
   "SELECT * FROM _perch_meta",
   "UPDATE _perch_checkins SET message = 'x'",
   "DELETE FROM _perch_kv",
-  "DROP TABLE todos",
-  "CREATE TABLE sneaky (id TEXT PRIMARY KEY)",
+  "DROP TABLE _perch_kv",
+  "CREATE TABLE _perch_sneaky (id TEXT PRIMARY KEY)",
+  "CREATE INDEX sneaky ON _perch_blobs (size)",
   "BEGIN",
   "ATTACH DATABASE '/tmp/x.db' AS x",
   "PRAGMA journal_mode = DELETE",
+  "PRAGMA writable_schema = ON",
 ]) {
-  r = await mcp.tool("test_call", { kind: "rpc", method: "probe", args: [q] });
+  r = await mcp.tool("call_object", { target: "preview", kind: "rpc", method: "probe", args: [q] });
   ok(r.v.result !== "allowed" && /not authorized|prohibited/i.test(r.v.result), `object code refused: ${q}`);
 }
+// Its own schema is the code's to change, as on Cloudflare.
+for (const q of ["CREATE TABLE scratch (id INTEGER PRIMARY KEY AUTOINCREMENT, v TEXT)", "CREATE INDEX scratch_v ON scratch (v)", "ALTER TABLE scratch ADD COLUMN w TEXT", "DROP TABLE scratch"]) {
+  r = await mcp.tool("call_object", { target: "preview", kind: "rpc", method: "probe", args: [q] });
+  ok(r.v.result === "allowed", `object code may change its own schema: ${q}`);
+}
+r = await mcp.tool("read_object", { target: "preview", kind: "rpc", method: "probe", args: ["CREATE TABLE during_read (id TEXT)"] });
+ok(r.v.result !== "allowed", "a read call cannot change the schema");
 r = await mcp.tool("query_data", { sql: "SELECT * FROM _perch_checkins" });
 ok(r.isError, "query_data refuses reserved tables");
 r = await mcp.tool("query_data", { sql: "DELETE FROM todos", target: "preview" });
 ok(r.isError && /not authorized|readonly/i.test(r.text), "query_data refuses writes");
-r = await mcp.tool("propose_change", { message: "bad migration", migrations: [{ name: "x", sql: "DELETE FROM _perch_checkins" }] });
-ok(r.isError, "a migration cannot touch reserved tables");
-r = await mcp.tool("propose_change", { message: "no pk", migrations: [{ name: "x", sql: "CREATE TABLE t (a TEXT)" }] });
-ok(r.isError && r.text.includes("PRIMARY KEY"), "data tables need a primary key");
-r = await mcp.tool("propose_change", { message: "autoinc", migrations: [{ name: "x", sql: "CREATE TABLE t (id INTEGER PRIMARY KEY AUTOINCREMENT)" }] });
-ok(r.isError && r.text.includes("AUTOINCREMENT"), "AUTOINCREMENT is refused");
+r = await mcp.tool("query_data", { sql: "CREATE TABLE q (id TEXT)", target: "preview" });
+ok(r.isError, "query_data refuses schema changes");
 
 // Discard the probe: start over from live with the clean code.
-r = await mcp.tool("propose_change", {
-  restart: true,
-  message: "to-do API with nightly cleanup",
-  files: { "src/index.ts": src("src/index.ts"), "src/uuid.ts": src("src/uuid.ts"), "src/stats.html": src("src/stats.html") },
-  migrations: [{ name: "0001_todos", sql: src("migrations/0001_todos.sql") }],
-});
+r = await mcp.tool("propose_change", { restart: true, message: "to-do API with nightly cleanup", files: TODO });
 ok(r.v.build.ok && !r.v.stacked_on_previous_preview, "restart starts from live");
 r = await mcp.tool("release_change", {});
 ok(!r.isError && r.v.released, `release_change moves live (${r.v.released?.slice(0, 12)})`);
@@ -156,8 +158,8 @@ ok(r.v.live_checkin.id === good && r.v.tables.some((t: any) => t.name === "todos
 r = await mcp.tool("call_object", { kind: "rpc", method: "add", args: ["write tests"] });
 ok(r.v.ok && r.v.result.title === "write tests", "call_object rpc on live");
 ok(sh(["describe", file]).next_alarm, "first live event ran the constructor, which scheduled the nightly alarm");
-r = await mcp.tool("list_checkins", { diffs: true });
-ok(r.v.checkins[0].live && r.v.checkins[0].migrations.length === 1 && r.v.checkins[0].diff.includes("+import { uuidv7 }"), "list_checkins shows diff and migration");
+r = await mcp.tool("describe_object");
+ok(r.v.checkins.total === 2 && r.v.checkins.recent[0].live && r.v.checkins.recent[0].id === good && r.v.checkins.recent[1].message === "new object", "describe_object carries the code history");
 
 // ------------------------------------------------------------------ perch run: HTTP + RPC + alarm
 async function serve(path: string, port: number): Promise<ChildProcess> {
@@ -179,21 +181,20 @@ ok((await res.json()).done === 1, "HTTP PATCH marks done");
 res = await fetch(`${base}/todos?done=0`);
 const open = await res.json();
 ok(open.length === 1 && open[0].title === "write tests", "HTTP GET with query filter");
+res = await fetch(`${base}/api/stats`);
+let stats = await res.json();
+ok(stats.total === 2 && stats.done === 1, "a route the class defines returns the right data");
 res = await fetch(`${base}/.perch/rpc/stats`, { method: "POST", body: "[]" });
-let stats = (await res.json()).result;
-ok(stats.total === 2 && stats.done === 1, "RPC over HTTP returns the right data");
-res = await fetch(`${base}/.perch/rpc/constructor`, { method: "POST", body: "[]" });
-ok(res.status === 500, "non-public methods are not RPC");
+ok(res.status === 404, "methods are not reachable over HTTP: only what fetch() routes");
 
-await fetch(`${base}/.perch/rpc/setRetention`, { method: "POST", body: "[0]" });
-await fetch(`${base}/.perch/rpc/scheduleCleanup`, { method: "POST", body: "[300]" });
+await fetch(`${base}/api/cleanup`, { method: "POST", body: JSON.stringify({ retentionMs: 0, inMs: 300 }) });
 await Bun.sleep(1200);
-stats = (await (await fetch(`${base}/.perch/rpc/stats`, { method: "POST", body: "[]" })).json()).result;
+stats = await (await fetch(`${base}/api/stats`)).json();
 ok(stats.total === 1 && stats.done === 0 && stats.lastCleanup, "alarm fired on schedule and its writes show up in the data");
 const d = sh(["describe", file]);
 ok(d.next_alarm && d.next_alarm.at_ms > Date.now() + 60_000, "alarm rescheduled itself for midnight");
 
-// ------------------------------------------------------------------ bad release + rollback while running
+// ------------------------------------------------------------------ bad release, rollback, schema steps
 r = await mcp.tool("propose_change", {
   message: "oops: break listing",
   files: { "src/index.ts": src("src/index.ts").replace('if (request.method === "GET" && !id) {', 'if (request.method === "GET" && !id) {\n      throw new Error("listing broke");') },
@@ -203,24 +204,55 @@ r = await mcp.tool("release_change", {});
 const bad = r.v.released;
 res = await fetch(`${base}/todos`);
 ok(res.status === 500 && (await res.text()).includes("listing broke"), "running server picked up the bad release");
-r = await mcp.tool("rollback_code", { checkin: good.slice(0, 10) });
-ok(!r.isError && r.v.live === good, "rollback_code moves live back");
+r = await mcp.tool("propose_change", { message: "back to the good code", from_checkin: good.slice(0, 10) });
+ok(r.v.build.ok && r.v.files_changed.includes("src/index.ts") && r.v.from_checkin === good, "propose_change from_checkin starts from an earlier check-in's files");
+r = await mcp.tool("release_change", {});
+ok(!r.isError, "the rollback is released like any change");
 res = await fetch(`${base}/todos`);
 ok(res.status === 200 && (await res.json()).length === 1, "running server serves the rolled-back code");
 
-// A rollback across a breaking migration is refused.
-r = await mcp.tool("propose_change", {
-  message: "rename title to text",
-  files: { "src/index.ts": src("src/index.ts").replaceAll("title", "text") },
-  migrations: [{ name: "0002_rename", sql: "ALTER TABLE todos RENAME COLUMN title TO text" }],
+// A schema step: a new file, imported and listed. It runs on the preview's
+// copy of the data, then on live at release.
+const withStep = (name: string, sql: string, n: number) => ({
+  files: { [`migrations/${name}.sql`]: sql },
+  edits: [
+    { path: "src/schema.ts", old: "\n\n/** Schema steps", new: `\nimport s${n} from "../migrations/${name}.sql";\n\n/** Schema steps` },
+    { path: "src/schema.ts", old: "\n};", new: `\n  "${name}": s${n},\n};` },
+  ],
 });
-ok(r.v.build.ok, "propose a breaking schema change");
-r = await mcp.tool("release_change", { message: "rename title to text" });
-ok(!r.isError, "release the breaking change");
-r = await mcp.tool("rollback_code", { checkin: good });
-ok(r.isError && r.text.includes("todos.title no longer exists"), "rollback refused when old code no longer fits the schema");
-r = await mcp.tool("rollback_code", { checkin: bad });
-ok(r.isError, "and for the bad release too");
+r = await mcp.tool("propose_change", { message: "notes on items", ...withStep("0002_note", "ALTER TABLE todos ADD COLUMN note TEXT;", 2) });
+ok(r.v.build.ok && r.v.schema.todos.some((c: any) => c.name === "note"), "a new schema step runs on the preview when its constructor runs");
+r = await mcp.tool("query_data", { sql: "SELECT note FROM todos" });
+ok(r.isError, "live does not have the column yet");
+r = await mcp.tool("release_change", { message: "notes on items" });
+const noted = r.v.released;
+ok(!r.isError && r.v.schema.todos.some((c: any) => c.name === "note"), "release starts the new code on live, which applies the step");
+r = await mcp.tool("query_data", { sql: "SELECT title, note FROM todos" });
+ok(r.v.rows.length === 1 && r.v.rows[0][0] === "write tests" && r.v.rows[0][1] === null, "the live rows are kept, with the new column");
+res = await fetch(`${base}/todos`);
+ok(res.status === 200 && "note" in (await res.json())[0], "the running server picked up the new schema");
+
+// A step that is fine on the preview but fails on live, because live data
+// changed in between: the release is undone.
+r = await mcp.tool("propose_change", { message: "unique titles", ...withStep("0003_unique", "CREATE UNIQUE INDEX todos_title ON todos (title);", 3) });
+ok(r.v.build.ok, "a unique index builds on the preview's copy of the data");
+await mcp.tool("call_object", { kind: "rpc", method: "add", args: ["write tests"] });
+r = await mcp.tool("release_change", {});
+ok(r.isError && r.text.includes("release undone") && /UNIQUE/i.test(r.text), "a constructor that fails on live undoes the release");
+r = await mcp.tool("describe_object");
+ok(r.v.live_checkin.id === noted && r.v.checkins.recent[0].id === noted, "live keeps the code it had, and the failed check-in is gone");
+r = await mcp.tool("read_object", { kind: "rpc", method: "stats" });
+ok(r.v.ok && r.v.result.total === 2, "the live object still runs");
+r = await mcp.tool("query_data", { sql: "SELECT count(*) FROM schema_steps" });
+ok(r.v.rows[0][0] === 2, "the failed step left nothing behind");
+// Rebuilt from live, the same step now fails where it should: on the preview.
+r = await mcp.tool("propose_change", { restart: true, message: "unique titles", ...withStep("0003_unique", "CREATE UNIQUE INDEX todos_title ON todos (title);", 3) });
+ok(r.isError && !r.v.build.ok && /UNIQUE/i.test(r.v.build.error), "a step that fails on real rows fails on the preview, before release");
+r = await mcp.tool("release_change", {});
+ok(r.isError && r.text.includes("did not build"), "a preview that did not build cannot be released");
+// Older code on a newer schema: nothing checks the fit; the preview is the test.
+r = await mcp.tool("propose_change", { restart: true, message: "back before notes", from_checkin: good });
+ok(r.v.build.ok && r.v.schema.todos.some((c: any) => c.name === "note"), "rolling code back leaves the schema as it is");
 run.kill();
 mcp.close();
 
@@ -232,13 +264,12 @@ copyFileSync(file, file2);
 const port2 = port + 1;
 run = await serve(file2, port2);
 const listed = await (await fetch(`http://127.0.0.1:${port2}/todos`)).json();
-ok(listed.length === 1 && listed[0].text === "write tests", "copied file serves the same code and data");
+ok(listed.length === 2 && listed[0].title === "write tests", "copied file serves the same code and data");
 const d2 = sh(["describe", file2]);
 ok(d2.live_checkin.id === sh(["describe", file]).live_checkin.id, "same live check-in after the copy");
 run.kill();
 
-const changes = sh(["checkins", file, "--limit", "100"]);
-ok(changes.total === 4, `history kept (${changes.total} check-ins)`);
+ok(d2.checkins.total === 5, `history kept (${d2.checkins.total} check-ins)`);
 
 // ------------------------------------------------------------------ static files and text imports
 const site = join(dir, "site.perch");
@@ -265,11 +296,11 @@ export class Site extends DurableObject {
 ok(!r.v.build.ok && r.v.build.error.includes("boom in constructor"), "a throwing constructor fails the build");
 const get = (path: string, extra: any = {}) =>
   extra.http_method === "POST"
-    ? m2.tool("test_call", { kind: "fetch", path, ...extra })
+    ? m2.tool("call_object", { kind: "fetch", path, target: "preview", ...extra })
     : m2.tool("read_object", { kind: "fetch", path, target: "preview", ...extra });
 r = await get("/");
 ok(r.v.status === 200 && r.v.body === "<h1>home</h1>" && r.v.asset === "public/index.html", "/ serves public/index.html without waking the broken object");
-ok(Object.keys(r.v.changes).length === 0 && r.v.logs.length === 0, "a static file runs no event (no changes, no logs)");
+ok(r.v.rows_written === 0 && r.v.logs.length === 0, "a static file runs no event (no writes, no logs)");
 const cases: [string, number, string][] = [
   ["/index.html", 307, "/"],
   ["/about", 200, "<h1>about</h1>"],
@@ -316,8 +347,6 @@ r = await m2.tool("release_change", {});
 ok(!r.isError, "release the site");
 r = await m2.tool("describe_object");
 ok(r.v.public.files === 4 && r.v.public.bytes > 100 && r.v.public.first.includes("public/logo.png") && r.v.files.every((f: any) => f.path.startsWith("src/")), "describe_object lists code files and summarises static files");
-r = await m2.tool("list_checkins", { diffs: true });
-ok(r.v.checkins[0].diff.includes("Static file public/logo.png added") && r.v.checkins[0].public_files === 4, "diffs name static files without reading them");
 r = await m2.tool("read_object", { kind: "fetch", path: "/docs/" });
 ok(r.v.body === "<h1>docs</h1>" && r.v.read_only, "static files on live through read_object");
 m2.close();
@@ -344,6 +373,8 @@ const wr = JSON.parse(readFileSync(join(out, "wrangler.jsonc"), "utf8").replace(
 ok(wr.assets?.directory === "./public", "export maps public/ to assets.directory");
 ok(readFileSync(join(out, "public/logo.png")).equals(PNG) && readFileSync(join(out, "src/hello.html"), "utf8") === "<h1>dynamic</h1>", "export writes binary and text files unchanged");
 ok(wr.rules?.[0]?.globs?.includes("**/*.css"), "export adds text-import rules for .css/.md/.svg");
+const worker = readFileSync(join(out, "perch/worker.js"), "utf8");
+ok(worker.includes('export { Site } from "../src/index.ts"') && !existsSync(join(out, "perch/migrations.js")) && !worker.includes("rpc"), "the exported Worker only re-exports the class and routes to it");
 
 // ------------------------------------------------------------------ edits, stored tests, undo
 const gate = join(dir, "gate.perch");
@@ -352,11 +383,7 @@ const m3 = new Mcp(gate);
 await m3.rpc("initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "e2e", version: "0" } });
 r = await m3.tool("propose_change", {
   message: "to-do with stored tests",
-  files: {
-    "src/index.ts": src("src/index.ts"), "src/uuid.ts": src("src/uuid.ts"), "src/stats.html": src("src/stats.html"),
-    "test/todo.test.ts": src("test/todo.test.ts"),
-  },
-  migrations: [{ name: "0001_todos", sql: src("migrations/0001_todos.sql") }],
+  files: { ...TODO, "test/todo.test.ts": src("test/todo.test.ts") },
 });
 ok(r.v.build.ok && r.v.tests.ok && r.v.tests.total === 8, "propose_change runs the stored tests (8 pass)");
 
@@ -380,18 +407,13 @@ r = await m3.tool("propose_change", {
 ok(r.v.tests.ok, "fixing it with an edit makes the tests pass");
 r = await m3.tool("release_change", { message: "to-do with stored tests" });
 ok(!r.isError && r.v.released, "release goes through once tests pass");
-r = await m3.tool("run_tests", { target: "live" });
-ok(r.v.ok && r.v.passed === 8 && r.v.target === "live", "run_tests on live");
+ok(sh(["test", gate]).passed === 8, "perch test runs the stored tests from the CLI");
 r = await m3.tool("query_data", { sql: "SELECT count(*) FROM todos" });
 ok(r.v.rows[0][0] === 0, "tests ran on scratch copies: live has no rows");
 
-// Two rows on live, and a migration released over them.
-r = await m3.tool("call_object", { kind: "rpc", method: "add", args: ["first"] });
-ok(r.v.changes.todos?.inserts === 1, "a write call reports the rows it changed");
+// Two rows on live.
+await m3.tool("call_object", { kind: "rpc", method: "add", args: ["first"] });
 await m3.tool("call_object", { kind: "rpc", method: "add", args: ["second"] });
-r = await m3.tool("propose_change", { message: "add notes", migrations: [{ name: "0002_note", sql: "ALTER TABLE todos ADD COLUMN note TEXT" }] });
-r = await m3.tool("release_change", {});
-ok(!r.isError, "release a migration");
 
 // Reads and writes are separate tools, and the read is enforced by the runtime.
 r = await m3.tool("read_object", { kind: "rpc", method: "stats" });
@@ -410,15 +432,11 @@ r = await m3.tool("read_object", { kind: "fetch", path: "/todos", http_method: "
 ok(r.isError && r.text.includes("call_object"), "read_object refuses POST");
 r = await m3.tool("call_object", { kind: "fetch", path: "/todos", http_method: "GET" });
 ok(r.isError && r.text.includes("read_object"), "call_object refuses GET");
-r = await m3.tool("test_call", { kind: "fetch", path: "/todos", http_method: "GET" });
-ok(r.isError && r.text.includes("read_object"), "test_call refuses GET");
+r = await m3.tool("call_object", { target: "preview", kind: "fetch", path: "/todos", http_method: "GET" });
+ok(r.isError && r.text.includes("read_object"), "call_object refuses GET on the preview too");
 r = await m3.tool("call_object", { kind: "fetch", path: "/todos", body: { title: "third" } });
 ok(r.v.status === 201, "call_object defaults to POST and still writes");
-r = await m3.tool("list_checkins", {});
-ok(r.v.checkins[0].diff === undefined, "list_checkins leaves diffs out unless asked");
 m3.close();
-
-ok(sh(["test", gate]).passed === 8, "perch test runs the stored tests from the CLI");
 
 // ------------------------------------------------------------------ bulk import of static files
 const big = join(dir, "gallery.perch");
@@ -434,9 +452,9 @@ sh(["new", big, "--class", "Todo", "--name", "gallery", "--from", join(ROOT, "ex
 const before3 = sh(["describe", big]).public.files;
 let imp = sh(["import", big, photos, "--into", "public/img"]);
 ok(imp.imported && imp.added === N && imp.public_files === before3 + N, `perch import streams ${N} files into public/img/ as one check-in`);
-ok(sh(["checkins", big]).checkins[0].public_files === before3 + N && sh(["checkins", big]).total === 2, "the import is one check-in");
+ok(sh(["describe", big]).checkins.total === 2, "the import is one check-in");
 imp = sh(["import", big, photos, "--into", "public/img"]);
-ok(!imp.imported && imp.unchanged === N && sh(["checkins", big]).total === 2, "importing the same directory again changes nothing");
+ok(!imp.imported && imp.unchanged === N && sh(["describe", big]).checkins.total === 2, "importing the same directory again changes nothing");
 await Bun.write(join(photos, "set0/p00000.jpg"), "a new version of photo 0");
 await Bun.write(join(photos, "set1/extra.jpg"), "one more");
 (await import("node:fs")).rmSync(join(photos, "set2/p00002.jpg"));
@@ -478,32 +496,19 @@ const ex = sh(["export", big, exp]);
 ok(ex.warnings.length === 0 && readFileSync(join(exp, "public/img/set0/p00000.jpg"), "utf8") === "a new version of photo 0", "export writes the imported files, with no warning under the Cloudflare limit");
 
 // ------------------------------------------------------------------ a copy without the data
-// The source has rows written at runtime, a key-value entry, an alarm, several
-// check-ins, and a migration that loads data, as a real app might.
+// The source has rows, a key-value entry, an alarm and several check-ins.
 sh(["call", big, "add", '["a private row zq81"]']);
 sh(["call", big, "setRetention", "[12345]"]);
-const m5 = new Mcp(big);
-await m5.rpc("initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "e2e", version: "0" } });
-r = await m5.tool("propose_change", { message: "load data", migrations: [{ name: "0002_data", sql: "CREATE TABLE notes (id TEXT PRIMARY KEY, body TEXT NOT NULL); INSERT INTO notes (id, body) VALUES ('seed-1', 'loaded by a migration zq82'); CREATE INDEX notes_body ON notes (body);" }] });
-r = await m5.tool("release_change", {});
-ok(!r.isError, "the source has a migration that loads data");
-m5.close();
 const shared = join(dir, "shared.perch");
-const cp = sh(["new", shared, "--like", big]);
-const ds = sh(["describe", shared]);
-ok(cp.tables.includes("todos") && cp.tables.includes("notes") && ds.tables.every((t: any) => t.rows === 0) && ds.kv_keys === 0 && !ds.next_alarm, "perch new --like makes a copy with the same tables and no rows, key-value entries or alarm");
+sh(["new", shared, "--like", big]);
+let ds = sh(["describe", shared]);
+ok(ds.tables.length === 0 && ds.kv_keys === 0 && !ds.next_alarm, "perch new --like makes a copy with no tables, rows, key-value entries or alarm");
 ok(ds.public.files === sh(["describe", big]).public.files && ds.files.length === sh(["describe", big]).files.length, "the copy has the same code and static files");
-ok(sh(["checkins", shared]).total === 1 && ds.migrations_applied === 1, "the copy has one check-in and one schema migration: no history");
-const raw = readFileSync(shared).toString("latin1");
-ok(!raw.includes("zq81") && !raw.includes("zq82") && readFileSync(big).toString("latin1").includes("zq82"), "neither runtime rows nor migration-loaded rows are anywhere in the copy's bytes");
-const { Database } = await import("bun:sqlite");
-{
-  const db = new Database(shared);
-  const idx = (db.query("SELECT name FROM sqlite_master WHERE type='index' AND sql IS NOT NULL").all() as { name: string }[]).map((x) => x.name);
-  db.close();
-  ok(idx.includes("todos_done") && idx.includes("notes_body"), "indexes are carried over");
-}
+ok(ds.checkins.total === 1, "the copy has one check-in: no history");
+ok(!readFileSync(shared).toString("latin1").includes("zq81") && readFileSync(big).toString("latin1").includes("zq81"), "the source's rows are nowhere in the copy's bytes");
 ok(sh(["test", shared]).passed === 8 && sh(["call", shared, "add", '["works"]']).result.title === "works", "the copy passes its stored tests and runs");
+ds = sh(["describe", shared]);
+ok(ds.tables.find((t: any) => t.name === "todos")?.rows === 1 && ds.next_alarm, "its code built the tables the first time it ran");
 
 console.log(`\n${passed} checks passed (${dir})`);
 process.exit(0);

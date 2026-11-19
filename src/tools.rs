@@ -1,7 +1,7 @@
-//! The nine object tools. The MCP server exposes them one to one; the CLI
-//! reuses them for `describe`, `checkins`, `call` and `fetch`.
+//! The object tools. The MCP server exposes them one to one; the CLI reuses
+//! them for `describe`, `call`, `fetch`, `test` and `import`.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Result, anyhow, bail};
@@ -10,12 +10,15 @@ use serde_json::{Value, json};
 
 use crate::engine::exec_sql;
 use crate::host::{Event, Host, Outcome};
-use crate::store::{Files, Manifest, Migration, Mode, PUBLIC_DIR, Store, schema_fits};
+use crate::store::{Files, Manifest, Mode, PUBLIC_DIR, Store};
 
 pub struct Tools {
     pub path: PathBuf,
     live: Option<Host>,
     preview: Option<Host>,
+    /// Which of the two was created last. V8 isolates on one thread must be
+    /// dropped newest first, so the pair is always dropped together, in order.
+    preview_is_newer: bool,
 }
 
 #[derive(Deserialize, Default)]
@@ -26,8 +29,13 @@ pub struct ProposeArgs {
     /// exact-string replacements in existing text files, applied after `files`
     #[serde(default)]
     pub edits: Vec<EditArg>,
+    /// Start from the files of this earlier check-in instead of the live ones
+    /// (a rollback that goes through the preview and the tests).
     #[serde(default)]
-    pub migrations: Vec<Migration>,
+    pub from_checkin: Option<String>,
+    /// Not accepted: schema lives in the object's code.
+    #[serde(default)]
+    pub migrations: Option<Value>,
     pub message: String,
     #[serde(default)]
     pub restart: bool,
@@ -132,24 +140,21 @@ fn iso(ms: i64) -> String {
     format!("{y:04}-{mo:02}-{d:02}T{h:02}:{m:02}:{s:02}Z")
 }
 
-/// Write a file list + migrations as a new check-in and make it live in `store`,
-/// all in one transaction.
+/// Write a file list as a new check-in and make it live in `store`, in one
+/// transaction.
 fn commit_checkin(
     store: &Store,
     parent: Option<&str>,
     build: impl FnOnce(&Store) -> Result<Manifest>,
-    migrations: &[Migration],
     message: &str,
-) -> Result<(String, Vec<String>)> {
+) -> Result<String> {
     store.with_mode(Mode::Privileged, |c| c.execute_batch("BEGIN IMMEDIATE"))?;
     let r = (|| {
         // `build` stores any new blobs and returns the check-in's file list.
         let manifest = build(store)?;
         let id = store.insert_checkin(parent, &manifest, message)?;
-        let warnings = store.apply_migrations(migrations, &id)?;
-        store.snapshot_schema(&id)?;
         store.set_meta("live_checkin", &id)?;
-        Ok::<_, anyhow::Error>((id, warnings))
+        Ok::<_, anyhow::Error>(id)
     })();
     match r {
         Ok(v) => {
@@ -200,7 +205,18 @@ pub fn outcome_json(o: &Outcome) -> Value {
 impl Tools {
     pub fn new(path: PathBuf) -> Result<Tools> {
         Store::open(&path)?;
-        Ok(Tools { path, live: None, preview: None })
+        Ok(Tools { path, live: None, preview: None, preview_is_newer: false })
+    }
+
+    /// Stop both running objects, newest first. They restart on next use.
+    fn drop_hosts(&mut self) {
+        if self.preview_is_newer {
+            self.preview = None;
+            self.live = None;
+        } else {
+            self.live = None;
+            self.preview = None;
+        }
     }
 
     fn store(&self) -> Result<Store> {
@@ -271,21 +287,27 @@ impl Tools {
             c.query_row("SELECT count(*) FROM _perch_kv", [], |r| r.get(0))
         })?;
         let file_bytes = std::fs::metadata(&s.path).map(|m| m.len()).unwrap_or(0);
+        // The code history, newest first. An earlier check-in can be read with
+        // read_code and restored with propose_change from_checkin.
+        let all = s.checkins()?;
+        let history: Vec<Value> = all
+            .iter()
+            .take(10)
+            .map(|c| json!({ "id": c.id, "message": c.message, "at": iso(c.created_at), "live": c.id == live }))
+            .collect();
         Ok(json!({
             "name": s.meta_req("name")?,
             "class": s.meta_req("class")?,
-            "main": s.meta("main")?,
             "format_version": s.meta("format_version")?,
-            "api_version": s.meta("api_version")?,
             "target": if is_preview { "preview" } else { "live" },
             "file": s.path.display().to_string(),
             "file_bytes": file_bytes,
             "live_checkin": { "id": ck.id, "message": ck.message, "at": iso(ck.created_at) },
+            "checkins": { "total": all.len(), "recent": history },
             "tables": tables,
             "kv_keys": kv_keys,
             "files": files,
             "public": { "files": public_n, "bytes": public_bytes, "first": public_sample },
-            "migrations_applied": s.migrations()?.len(),
             "next_alarm": alarm_json(alarm),
             "preview": if is_preview {
                 json!({ "base": s.meta("preview_base")?, "built": s.meta("preview_built")?.as_deref() == Some(live.as_str()) })
@@ -335,77 +357,6 @@ impl Tools {
         }))
     }
 
-    pub fn list_checkins(&self, limit: usize, diffs: bool) -> Result<Value> {
-        let s = self.store()?;
-        let live = s.live_checkin()?;
-        let all = s.checkins()?;
-        let migs = s.migrations()?;
-        let mut out = Vec::new();
-        for ck in all.iter().take(limit) {
-            let added: Vec<Value> = migs
-                .iter()
-                .filter(|m| m.3 == ck.id)
-                .map(|m| json!({ "seq": m.0, "name": m.1, "sql": m.2 }))
-                .collect();
-            let mut entry = json!({
-                "id": ck.id,
-                "parent": ck.parent,
-                "message": ck.message,
-                "at": iso(ck.created_at),
-                "live": ck.id == live,
-                "files": ck.manifest.keys().filter(|p| !p.starts_with(PUBLIC_DIR)).collect::<Vec<_>>(),
-                "public_files": ck.manifest.keys().filter(|p| p.starts_with(PUBLIC_DIR)).count(),
-                "migrations": added,
-            });
-            if diffs {
-                // Compare file lists by hash; read contents only for files that changed.
-                let parent = match &ck.parent {
-                    Some(p) => s.manifest_at(p).unwrap_or_default(),
-                    None => Manifest::new(),
-                };
-                let mut d = String::new();
-                let mut static_changed = 0usize;
-                let paths: std::collections::BTreeSet<&String> = parent.keys().chain(ck.manifest.keys()).collect();
-                for p in paths {
-                    let (ah, bh) = (parent.get(p), ck.manifest.get(p));
-                    if ah == bh {
-                        continue;
-                    }
-                    if p.starts_with(PUBLIC_DIR) {
-                        // Static files are reported, not diffed, and only the first few by name.
-                        static_changed += 1;
-                        if static_changed <= 20 {
-                            d.push_str(&format!("Static file {p} {}\n", match (ah, bh) { (None, _) => "added", (_, None) => "removed", _ => "changed" }));
-                        }
-                        continue;
-                    }
-                    let ab = ah.map(|h| s.blob(h)).transpose()?;
-                    let bb = bh.map(|h| s.blob(h)).transpose()?;
-                    let (a, b) = match (
-                        ab.as_deref().map(std::str::from_utf8).transpose(),
-                        bb.as_deref().map(std::str::from_utf8).transpose(),
-                    ) {
-                        (Ok(a), Ok(b)) => (a.unwrap_or(""), b.unwrap_or("")),
-                        _ => {
-                            d.push_str(&format!("Binary file {p} differs\n"));
-                            continue;
-                        }
-                    };
-                    let diff = similar::TextDiff::from_lines(a, b);
-                    let from = if ah.is_some() { format!("a/{p}") } else { "/dev/null".into() };
-                    let to = if bh.is_some() { format!("b/{p}") } else { "/dev/null".into() };
-                    d.push_str(&diff.unified_diff().context_radius(3).header(&from, &to).to_string());
-                }
-                if static_changed > 20 {
-                    d.push_str(&format!("… and {} more static files\n", static_changed - 20));
-                }
-                entry["diff"] = Value::String(d);
-            }
-            out.push(entry);
-        }
-        Ok(json!({ "live": live, "checkins": out, "total": all.len() }))
-    }
-
     pub fn query_data(&self, sql: &str, params: &[Value], target: Option<&str>) -> Result<Value> {
         let s = match target {
             Some("preview") => self.preview_store()?.ok_or_else(|| anyhow!("there is no preview copy"))?,
@@ -427,15 +378,20 @@ impl Tools {
         if a.message.trim().is_empty() {
             bail!("propose_change needs a message describing the change");
         }
+        if a.migrations.is_some() {
+            bail!("propose_change takes no migrations: schema lives in the object's code. Put each step in migrations/NNNN_name.sql, import it as text, and run the pending ones in the constructor (see the server instructions).");
+        }
         let live = self.store()?;
         let live_ck = live.live_checkin()?;
+        let from = a.from_checkin.as_deref().map(|c| live.resolve_checkin(c)).transpose()?;
         let ppath = preview_path(&self.path);
         let stack = !a.restart
+            && from.is_none()
             && match self.preview_store()? {
                 Some(p) => p.meta("preview_base")?.as_deref() == Some(live_ck.as_str()),
                 None => false,
             };
-        self.preview = None;
+        self.drop_hosts();
         if !stack {
             remove_db(&ppath);
             live.backup_to(&ppath)?;
@@ -447,9 +403,21 @@ impl Tools {
         let head = p.live_checkin()?;
         // The file list at the preview head, and the new contents this proposal
         // brings. Unchanged files (all of public/, usually) are never read.
-        let mut manifest = p.manifest_at(&head)?;
+        let head_manifest = p.manifest_at(&head)?;
+        let mut manifest = match &from {
+            // The preview is a copy of live, so it holds every earlier check-in.
+            Some(id) => p.manifest_at(id)?,
+            None => head_manifest.clone(),
+        };
         let mut pending: BTreeMap<String, Vec<u8>> = BTreeMap::new();
         let mut changed = vec![];
+        if from.is_some() {
+            for path in head_manifest.keys().chain(manifest.keys()).collect::<std::collections::BTreeSet<_>>() {
+                if !path.starts_with(PUBLIC_DIR) && head_manifest.get(path) != manifest.get(path) {
+                    changed.push(if manifest.contains_key(path) { path.clone() } else { format!("{path} (deleted)") });
+                }
+            }
+        }
         for (path, content) in &a.files {
             match content {
                 Some(v) => {
@@ -505,22 +473,23 @@ impl Tools {
             }
             Ok(manifest.clone())
         };
-        let (id, warnings) = commit_checkin(&p, Some(&head), build, &a.migrations, &a.message)
-            .map_err(|e| anyhow!("{e}\n(the preview is unchanged; fix the migration or code and propose again)"))?;
-        let schema = p.schema()?;
+        let id = commit_checkin(&p, Some(&head), build, &a.message)?;
         drop(p);
-        // Build: load the module graph and run the constructor on the preview.
+        // Build: load the module graph and run the constructor on the preview,
+        // which is where the code creates or changes its tables.
         let built = match Host::open(&ppath, false) {
             Ok(mut h) => {
                 let r = h.ensure().await;
                 if r.is_ok() {
                     self.preview = Some(h);
+                    self.preview_is_newer = true;
                 }
                 r
             }
             Err(e) => Err(e),
         };
         let ps = Store::open(&ppath)?;
+        let schema = ps.schema()?;
         match &built {
             Ok(()) => ps.set_meta("preview_built", &id)?,
             Err(_) => ps.delete_meta("preview_built")?,
@@ -538,12 +507,11 @@ impl Tools {
             "checkin": id,
             "base": live_ck,
             "stacked_on_previous_preview": stack,
+            "from_checkin": from,
             "files_changed": changed,
-            "migrations_applied": a.migrations.iter().map(|m| &m.name).collect::<Vec<_>>(),
-            "warnings": warnings,
             "schema": schema,
             "build": match &built { Ok(()) => json!({ "ok": true }), Err(e) => json!({ "ok": false, "error": e.to_string() }) },
-            "next": if built.is_err() { "fix the build error with another propose_change" } else if !tests_ok { "fix the failing tests with another propose_change; release_change is refused while they fail" } else { "test_call against the preview, then release_change" },
+            "next": if built.is_err() { "fix the build error with another propose_change. A failed constructor left the preview's data as it was; if a schema step that already ran needs changing, propose with restart: true" } else if !tests_ok { "fix the failing tests with another propose_change; release_change is refused while they fail" } else { "try it with read_object and call_object (target preview), then release_change" },
         }))
     }
 
@@ -603,7 +571,7 @@ impl Tools {
             "fetch" => {
                 let m = c.http_method.clone().unwrap_or_else(|| "GET".into()).to_uppercase();
                 if m != "GET" && m != "HEAD" {
-                    bail!("read_object takes GET or HEAD; {m} changes data, so use {}", if preview { "test_call" } else { "call_object" });
+                    bail!("read_object takes GET or HEAD; {m} changes data, so use call_object");
                 }
                 if !matches!(c.body, None | Some(Value::Null)) {
                     bail!("read_object requests have no body");
@@ -614,6 +582,17 @@ impl Tools {
             k => bail!("kind must be fetch or rpc (got {k:?})"),
         }
         c.allow_safe = true;
+        let name = self.host(preview)?.store.meta_req("name")?;
+        let ev = self.event_for(&c, &name)?;
+        let o = self.host(preview)?.read_event(ev).await?;
+        let mut v = outcome_json(&o);
+        v["target"] = json!(if preview { "preview" } else { "live" });
+        v["read_only"] = json!(true);
+        Ok(v)
+    }
+
+    /// The running object for a target, opened on first use.
+    fn host(&mut self, preview: bool) -> Result<&mut Host> {
         if preview {
             let ppath = preview_path(&self.path);
             if !ppath.exists() {
@@ -621,56 +600,43 @@ impl Tools {
             }
             if self.preview.is_none() {
                 self.preview = Some(Host::open(&ppath, false)?);
+                self.preview_is_newer = true;
             }
-        } else if self.live.is_none() {
-            self.live = Some(Host::open(&self.path, false)?);
+            Ok(self.preview.as_mut().unwrap())
+        } else {
+            if self.live.is_none() {
+                self.live = Some(Host::open(&self.path, false)?);
+                self.preview_is_newer = false;
+            }
+            Ok(self.live.as_mut().unwrap())
         }
-        let name = if preview { self.preview.as_ref() } else { self.live.as_ref() }.unwrap().store.meta_req("name")?;
-        let ev = self.event_for(&c, &name)?;
-        let h = if preview { self.preview.as_mut() } else { self.live.as_mut() }.unwrap();
-        let o = h.read_event(ev).await?;
-        let mut v = outcome_json(&o);
-        v["target"] = json!(if preview { "preview" } else { "live" });
-        v["read_only"] = json!(true);
-        Ok(v)
     }
 
-    pub async fn test_call(&mut self, c: CallArgs) -> Result<Value> {
+    /// A write call: an unsafe HTTP method to fetch(), a public method, or (on
+    /// the preview) the alarm handler.
+    pub async fn call_object(&mut self, c: CallArgs, target: Option<&str>) -> Result<Value> {
+        let preview = match target {
+            Some("preview") => true,
+            None | Some("live") => false,
+            Some(t) => bail!("target must be live or preview (got {t:?})"),
+        };
         // Validate the call shape (including "GET is a read") before anything else.
         self.event_for(&c, "check")?;
-        let ppath = preview_path(&self.path);
-        if !ppath.exists() {
-            bail!("there is no preview copy; propose_change creates one");
+        if c.kind == "alarm" && !preview {
+            bail!("alarms on the live object fire on schedule (perch run); to run alarm() by hand, use target \"preview\"");
         }
-        if self.preview.is_none() {
-            self.preview = Some(Host::open(&ppath, false)?);
-        }
-        let h = self.preview.as_mut().unwrap();
-        let name = h.store.meta_req("name")?;
+        let name = self.host(preview)?.store.meta_req("name")?;
         let ev = self.event_for(&c, &name)?;
-        let h = self.preview.as_mut().unwrap();
+        let h = self.host(preview)?;
         let o = h.event(ev).await?;
         let mut v = outcome_json(&o);
-        v["target"] = json!("preview");
+        v["target"] = json!(if preview { "preview" } else { "live" });
         if c.kind == "alarm" && (o.ok || o.alarm_missing) && !o.alarm_touched {
             // An alarm run by hand clears the pending alarm the way a fired one
             // does: only if the handler did not set or delete it itself.
             h.store.with_mode(Mode::Privileged, |c| c.execute("DELETE FROM _perch_alarms", []))?;
         }
         v["next_alarm"] = alarm_json(h.store.alarm()?);
-        Ok(v)
-    }
-
-    pub async fn call_object(&mut self, c: CallArgs) -> Result<Value> {
-        if self.live.is_none() {
-            self.live = Some(Host::open(&self.path, false)?);
-        }
-        let name = self.live.as_ref().unwrap().store.meta_req("name")?;
-        let ev = self.event_for(&c, &name)?;
-        let o = self.live.as_mut().unwrap().event(ev).await?;
-        let mut v = outcome_json(&o);
-        v["target"] = json!("live");
-        v["next_alarm"] = alarm_json(self.live.as_ref().unwrap().store.alarm()?);
         Ok(v)
     }
 
@@ -701,7 +667,7 @@ impl Tools {
                     .map(|r| r.iter().filter(|x| x["ok"] != json!(true)).map(|x| format!("{} > {}", x["file"].as_str().unwrap_or(""), x["name"].as_str().unwrap_or(""))).collect())
                     .unwrap_or_default();
                 bail!(
-                    "refusing to release: {} of {} stored tests fail ({}){}. Fix them with propose_change; run_tests shows the errors.",
+                    "refusing to release: {} of {} stored tests fail ({}){}. Fix them with propose_change; the errors are in propose_change's result.",
                     t["failed"], t["total"], failing.join("; "),
                     t["error"].as_str().map(|e| format!(": {e}")).unwrap_or_default()
                 );
@@ -716,13 +682,6 @@ impl Tools {
             cur = ck.parent.ok_or_else(|| anyhow!("preview chain does not reach the live check-in"))?;
         }
         chain.reverse();
-        let ids: HashSet<&str> = chain.iter().map(|c| c.id.as_str()).collect();
-        let migrations: Vec<Migration> = p
-            .migrations()?
-            .into_iter()
-            .filter(|m| ids.contains(m.3.as_str()))
-            .map(|m| Migration { name: m.1, sql: m.2 })
-            .collect();
         let manifest = p.manifest_at(&head)?;
         let live_manifest = live.manifest_at(&live_ck)?;
         let msg = message.unwrap_or_else(|| {
@@ -737,52 +696,43 @@ impl Tools {
             }
             Ok(manifest.clone())
         };
-        let (id, warnings) = commit_checkin(&live, Some(&live_ck), build, &migrations, &msg)
-            .map_err(|e| anyhow!("release failed and was rolled back; live is unchanged: {e}"))?;
+        let id = commit_checkin(&live, Some(&live_ck), build, &msg)?;
+        // Start the new code on the live data now: its constructor is where the
+        // schema changes. If it throws, its writes are rolled back, and the
+        // release is undone by pointing live back at the code it had.
+        self.drop_hosts();
+        let started = match Host::open(&self.path, false) {
+            Ok(mut h) => {
+                let r = h.ensure().await;
+                if r.is_ok() {
+                    self.live = Some(h);
+                    self.preview_is_newer = false;
+                }
+                r
+            }
+            Err(e) => Err(e),
+        };
+        if let Err(e) = started {
+            live.set_meta("live_checkin", &live_ck)?;
+            live.with_mode(Mode::Privileged, |c| c.execute("DELETE FROM _perch_checkins WHERE id=?", [&id]))?;
+            bail!("release undone; live is unchanged. The new code did not start on the live data (it did on the preview's copy, so live data has changed since): {e:#}\nPropose again with restart: true to rebuild the preview from live.");
+        }
         drop(p);
         self.preview = None;
-        self.live = None;
         remove_db(&preview_path(&self.path));
         Ok(json!({
             "released": id,
             "previous": live_ck,
             "message": msg,
-            "migrations_applied": migrations.iter().map(|m| &m.name).collect::<Vec<_>>(),
             "squashed_preview_checkins": chain.len(),
-            "warnings": warnings,
-        }))
-    }
-
-    pub fn rollback_code(&mut self, checkin: &str) -> Result<Value> {
-        let s = self.store()?;
-        let live_ck = s.live_checkin()?;
-        let target = s.checkin(checkin)?;
-        if target.id == live_ck {
-            bail!("{} is already live", &target.id[..12]);
-        }
-        let now = s.schema()?;
-        let old = target.schema.clone().unwrap_or_default();
-        if let Err(problems) = schema_fits(&old, &now) {
-            bail!(
-                "refusing: check-in {} expects a schema that no longer matches (migrations only go forward):\n- {}",
-                &target.id[..12],
-                problems.join("\n- ")
-            );
-        }
-        s.set_meta("live_checkin", &target.id)?;
-        self.live = None;
-        Ok(json!({
-            "live": target.id,
-            "previous": live_ck,
-            "message": target.message,
-            "note": "code moved back; schema and data are unchanged",
+            "schema": live.schema()?,
         }))
     }
 
     // ------------------------------------------------------------ stored tests
 
     /// Run the object's `test/` files. Every test gets its own fresh, empty
-    /// copy of the object (same code, every migration replayed, no data), so
+    /// copy of the object (same code, no data; its constructor builds the tables), so
     /// tests are deterministic and never see live or preview data.
     pub async fn run_tests(&mut self, target: Option<&str>) -> Result<Value> {
         let use_preview = match target {
@@ -803,14 +753,13 @@ impl Tools {
         if test_files.is_empty() {
             return Ok(json!({ "ok": true, "target": which, "total": 0, "passed": 0, "failed": 0, "results": [], "note": "no test files; add test/*.ts that import { test, expect } from \"perch:test\"" }));
         }
-        let migrations: Vec<Migration> = s.migrations()?.into_iter().map(|m| Migration { name: m.1, sql: m.2 }).collect();
         let (name, class) = (s.meta_req("name")?, s.meta_req("class")?);
         let dir = std::env::temp_dir().join(format!("perch-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir)?;
         let r = async {
             // One empty template, copied per test.
             let template = dir.join("template.perch");
-            drop(Store::create(&template, &name, &class, &files, &migrations, "test")?);
+            drop(Store::create(&template, &name, &class, &files, "test")?);
             let fresh = |i: usize| -> Result<PathBuf> {
                 let p = dir.join(format!("t{i}.perch"));
                 std::fs::copy(&template, &p)?;
@@ -914,11 +863,11 @@ impl Tools {
             }
             Ok(m)
         };
-        let done = commit_checkin(&live, Some(&live_ck), build, &[], &msg);
+        let done = commit_checkin(&live, Some(&live_ck), build, &msg);
         let total = |ck: &str| -> Result<usize> { Ok(live.manifest_at(ck)?.keys().filter(|k| k.starts_with(PUBLIC_DIR)).count()) };
         match done {
-            Ok((id, _)) => {
-                self.live = None;
+            Ok(id) => {
+                self.drop_hosts();
                 Ok(json!({
                     "imported": true,
                     "checkin": id,
@@ -947,7 +896,7 @@ impl Tools {
 const NOTHING_TO_IMPORT: &str = "nothing to import";
 
 /// Directories `perch new --from` reads object files from.
-pub const CODE_DIRS: &[&str] = &["src", "test"];
+pub const CODE_DIRS: &[&str] = &["src", "test", "migrations"];
 
 pub fn is_test_file(path: &str) -> bool {
     path.starts_with("test/") && (path.ends_with(".ts") || path.ends_with(".js"))

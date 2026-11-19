@@ -17,7 +17,7 @@ use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use serde_json::{Value, json};
 
-use crate::store::{Migration, Store};
+use crate::store::Store;
 use crate::tools::{CallArgs, Tools};
 
 #[derive(Parser)]
@@ -38,11 +38,12 @@ enum Cmd {
         /// Object name (defaults to the file name)
         #[arg(long)]
         name: Option<String>,
-        /// Directory with src/**, optional public/** (static files) and migrations/*.sql
+        /// Directory with src/**, and optionally test/**, migrations/** (schema
+        /// steps the code imports) and public/** (static files)
         #[arg(long)]
         from: Option<PathBuf>,
         /// Another object file to copy without its data: the same code, static
-        /// files, tests and schema, with empty tables. For sharing an app.
+        /// files and tests. Its constructor builds empty tables on first use.
         #[arg(long, conflicts_with = "from")]
         like: Option<PathBuf>,
     },
@@ -61,14 +62,6 @@ enum Cmd {
     Mcp { file: PathBuf },
     /// Print the object's description as JSON
     Describe { file: PathBuf },
-    /// Print the code history
-    Checkins {
-        file: PathBuf,
-        #[arg(long, default_value_t = 20)]
-        limit: usize,
-        #[arg(long)]
-        diffs: bool,
-    },
     /// Call an RPC method on the live object
     Call {
         file: PathBuf,
@@ -153,37 +146,19 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.cmd {
         Cmd::New { file, name, like: Some(source), .. } => {
-            // A copy without the data. Built from the live check-in's files and
-            // the source's current table definitions, so no row, key-value entry,
-            // alarm or earlier version of the code is carried. Nothing is deleted
-            // from a copy: the data is never written in the first place. The
-            // source's migrations are not replayed, because a migration can be
-            // a data load; the copy starts with one migration holding the schema.
+            // A copy without the data: the live check-in's files and nothing
+            // else. No row, key-value entry, alarm or earlier version of the
+            // code is written, so there is nothing to recover from the copy.
+            // The code builds its own (empty) tables the first time it runs.
             let src = Store::open(&source)?;
             let live = src.live_checkin()?;
             let name = name.unwrap_or(src.meta_req("name")?);
             let class = src.meta_req("class")?;
             let code = src.code_files_at(&live)?;
             let manifest_src = src.manifest_at(&live)?;
-            let ddl: Vec<String> = src.with_mode(store::Mode::Privileged, |c| -> rusqlite::Result<Vec<String>> {
-                // Tables first, then the indexes, triggers and views that depend on them.
-                let mut st = c.prepare(
-                    "SELECT sql FROM sqlite_master
-                     WHERE sql IS NOT NULL
-                       AND name NOT LIKE '\\_perch\\_%' ESCAPE '\\' AND tbl_name NOT LIKE '\\_perch\\_%' ESCAPE '\\'
-                       AND name NOT LIKE 'sqlite\\_%' ESCAPE '\\'
-                     ORDER BY CASE type WHEN 'table' THEN 0 WHEN 'index' THEN 1 WHEN 'view' THEN 2 ELSE 3 END, rowid",
-                )?;
-                st.query_map([], |r| r.get(0))?.collect()
-            })?;
-            let migrations: Vec<Migration> = if ddl.is_empty() {
-                vec![]
-            } else {
-                vec![Migration { name: "0001_schema".into(), sql: ddl.join(";\n") + ";\n" }]
-            };
             let msg = format!("copy of {} at {}, without data", src.meta_req("name")?, &live[..12]);
             let mut statics = 0usize;
-            let s = Store::create_with(&file, &name, &class, &code, &migrations, &msg, |st, manifest| {
+            let s = Store::create_with(&file, &name, &class, &code, &msg, |st, manifest| {
                 for (path, hash) in &manifest_src {
                     if path.starts_with(store::PUBLIC_DIR) {
                         manifest.insert(path.clone(), st.put_blob(&src.blob(hash)?)?);
@@ -200,8 +175,7 @@ fn main() -> Result<()> {
                 "checkin": s.live_checkin()?,
                 "files": code.keys().collect::<Vec<_>>(),
                 "public_files": statics,
-                "tables": s.schema()?.keys().collect::<Vec<_>>(),
-                "note": "tables are empty: no rows, key-value entries, alarm, code history or earlier migrations were copied. If the app needs reference data to work (a default list, settings), add it after copying.",
+                "note": "no rows, key-value entries, alarm or code history were copied. The code builds its tables, empty, the first time it runs.",
             }));
         }
         Cmd::New { file, class, name, from, .. } => {
@@ -212,7 +186,6 @@ fn main() -> Result<()> {
                 if p.is_empty() || p.starts_with(|c: char| c.is_ascii_digit()) { "Obj".into() } else { p }
             });
             let mut files = BTreeMap::new();
-            let mut migrations = vec![];
             let mut public_dir: Option<PathBuf> = None;
             let msg;
             if let Some(dir) = from {
@@ -227,17 +200,6 @@ fn main() -> Result<()> {
                     }
                 }
                 public_dir = Some(dir.join("public")).filter(|p| p.is_dir());
-                let mdir = dir.join("migrations");
-                if mdir.is_dir() {
-                    let mut entries: Vec<_> = std::fs::read_dir(&mdir)?.filter_map(|e| e.ok()).map(|e| e.path()).filter(|p| p.extension().is_some_and(|x| x == "sql")).collect();
-                    entries.sort();
-                    for p in entries {
-                        migrations.push(Migration {
-                            name: p.file_stem().unwrap().to_string_lossy().to_string(),
-                            sql: std::fs::read_to_string(&p)?,
-                        });
-                    }
-                }
                 msg = format!("import from {}", dir.display());
             } else {
                 files.insert("src/index.ts".to_string(), starter(&class).into_bytes());
@@ -245,7 +207,7 @@ fn main() -> Result<()> {
             }
             // Static files stream from disk one at a time; only code is held in memory.
             let mut public_stats = store::ImportStats::default();
-            let s = Store::create_with(&file, &name, &class, &files, &migrations, &msg, |st, manifest| {
+            let s = Store::create_with(&file, &name, &class, &files, &msg, |st, manifest| {
                 if let Some(p) = &public_dir {
                     public_stats = st.import_dir(p, store::PUBLIC_DIR, manifest, false, &mut progress("importing public/"))?;
                 }
@@ -258,7 +220,6 @@ fn main() -> Result<()> {
                 "checkin": s.live_checkin()?,
                 "files": files.keys().collect::<Vec<_>>(),
                 "public_files": public_stats.added,
-                "migrations": migrations.iter().map(|m| &m.name).collect::<Vec<_>>(),
             }));
         }
         Cmd::Run { file, port, host, no_alarms } => {
@@ -269,12 +230,11 @@ fn main() -> Result<()> {
         }
         Cmd::Mcp { file } => local(mcp::serve(file))?,
         Cmd::Describe { file } => print(&Tools::new(file)?.describe(None)?),
-        Cmd::Checkins { file, limit, diffs } => print(&Tools::new(file)?.list_checkins(limit, diffs)?),
         Cmd::Call { file, method, args } => local(async move {
             let args: Value = serde_json::from_str(&args).context("args must be a JSON array")?;
             let args = match args { Value::Array(a) => a, v => vec![v] };
             let mut t = Tools::new(file)?;
-            let v = t.call_object(CallArgs { kind: "rpc".into(), method: Some(method), args, ..Default::default() }).await?;
+            let v = t.call_object(CallArgs { kind: "rpc".into(), method: Some(method), args, ..Default::default() }, None).await?;
             print(&v);
             Ok(())
         })?,
@@ -282,7 +242,7 @@ fn main() -> Result<()> {
             let mut t = Tools::new(file)?;
             let body = data.map(|d| serde_json::from_str::<Value>(&d).unwrap_or(Value::String(d)));
             let v = t
-                .call_object(CallArgs { kind: "fetch".into(), path: Some(path), http_method: Some(method), body, allow_safe: true, ..Default::default() })
+                .call_object(CallArgs { kind: "fetch".into(), path: Some(path), http_method: Some(method), body, allow_safe: true, ..Default::default() }, None)
                 .await?;
             print(&v);
             Ok(())

@@ -2,7 +2,7 @@
 //! history, runtime state and data.
 //!
 //! Reserved tables all start with `_perch_`. Everything else is the object's
-//! own data, created only by migrations. The authorizer installed in
+//! own data, created by the object's own code, as on Cloudflare. The authorizer installed in
 //! [`Store::open`] enforces that boundary according to the current [`Mode`].
 
 use std::collections::BTreeMap;
@@ -17,8 +17,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-pub const FORMAT_VERSION: i64 = 2;
-pub const API_VERSION: &str = "perch-v0";
+pub const FORMAT_VERSION: i64 = 3;
 pub const DEFAULT_MAIN: &str = "src/index.ts";
 
 /// Who is running SQL right now. The authorizer reads this on every statement.
@@ -27,12 +26,11 @@ pub const DEFAULT_MAIN: &str = "src/index.ts";
 pub enum Mode {
     /// The runtime or MCP wrapper itself: anything goes.
     Privileged = 0,
-    /// Object code via `ctx.storage.sql`: data tables only, no DDL, no transactions.
+    /// Object code via `ctx.storage.sql`: its own tables, schema included; never
+    /// reserved tables, transactions, ATTACH or pragmas.
     Sandbox = 1,
-    /// `query_data`: reads of data tables only.
+    /// `query_data` and read calls: reads of data tables only.
     ReadOnly = 2,
-    /// A migration: DDL and DML on data tables, never on reserved ones.
-    Migration = 3,
 }
 
 #[derive(Clone)]
@@ -43,7 +41,6 @@ impl ModeCell {
         match self.0.load(Ordering::SeqCst) {
             1 => Mode::Sandbox,
             2 => Mode::ReadOnly,
-            3 => Mode::Migration,
             _ => Mode::Privileged,
         }
     }
@@ -58,40 +55,22 @@ fn reserved(name: &str) -> bool {
     name.starts_with("_perch_")
 }
 
-fn internal(name: &str) -> bool {
-    name.starts_with("sqlite_")
-}
-
 fn authorize(mode: Mode, ctx: AuthContext<'_>) -> Authorization {
     use AuthAction::*;
     if mode == Mode::Privileged {
         return Authorization::Allow;
     }
-    if let Some(db) = ctx.database_name {
-        if db == "temp" && mode != Mode::Migration {
-            return Authorization::Deny;
-        }
+    if ctx.database_name == Some("temp") {
+        return Authorization::Deny;
     }
-    let table_ok = |t: &str| !reserved(t);
+    let allow = |ok: bool| if ok { Authorization::Allow } else { Authorization::Deny };
+    let write = mode == Mode::Sandbox;
     match ctx.action {
         Select | Recursive | Function { .. } => Authorization::Allow,
-        Read { table_name, .. } => {
-            if table_ok(table_name) {
-                Authorization::Allow
-            } else {
-                Authorization::Deny
-            }
-        }
-        Insert { table_name } | Delete { table_name } | Update { table_name, .. } => {
-            // DDL in a migration writes sqlite_master itself; let it.
-            if mode == Mode::Migration && internal(table_name) {
-                Authorization::Allow
-            } else if mode == Mode::ReadOnly || !table_ok(table_name) || internal(table_name) {
-                Authorization::Deny
-            } else {
-                Authorization::Allow
-            }
-        }
+        Read { table_name, .. } => allow(!reserved(table_name)),
+        // Creating or altering a table writes sqlite_master itself; SQLite
+        // refuses direct writes to it without writable_schema, a denied pragma.
+        Insert { table_name } | Delete { table_name } | Update { table_name, .. } => allow(write && !reserved(table_name)),
         Pragma { pragma_name, .. } => {
             // Read-only introspection pragmas only.
             const OK: &[&str] = &[
@@ -103,38 +82,22 @@ fn authorize(mode: Mode, ctx: AuthContext<'_>) -> Authorization {
                 "index_xinfo",
                 "foreign_key_list",
             ];
-            if OK.contains(&pragma_name.to_ascii_lowercase().as_str()) {
-                Authorization::Allow
-            } else {
-                Authorization::Deny
-            }
+            allow(OK.contains(&pragma_name.to_ascii_lowercase().as_str()))
         }
+        // The object's code owns its schema, as on Cloudflare.
         CreateTable { table_name } | DropTable { table_name } | AlterTable { table_name, .. } => {
-            if mode == Mode::Migration && table_ok(table_name) && !internal(table_name) {
-                Authorization::Allow
-            } else {
-                Authorization::Deny
-            }
+            // SQLite itself refuses user tables named sqlite_*; an AUTOINCREMENT
+            // table makes sqlite_sequence through this same action.
+            allow(write && !reserved(table_name))
         }
         CreateIndex { table_name, .. }
         | DropIndex { table_name, .. }
         | CreateTrigger { table_name, .. }
-        | DropTrigger { table_name, .. } => {
-            if mode == Mode::Migration && table_ok(table_name) {
-                Authorization::Allow
-            } else {
-                Authorization::Deny
-            }
-        }
-        CreateView { .. } | DropView { .. } | Reindex { .. } | Analyze { .. } => {
-            if mode == Mode::Migration {
-                Authorization::Allow
-            } else {
-                Authorization::Deny
-            }
-        }
+        | DropTrigger { table_name, .. } => allow(write && !reserved(table_name)),
+        CreateView { view_name } | DropView { view_name } => allow(write && !reserved(view_name)),
+        Reindex { .. } | Analyze { .. } => allow(write),
         // BEGIN/COMMIT/SAVEPOINT, ATTACH, temp objects, virtual tables: never from
-        // object code or migrations. The runtime owns transactions.
+        // object code. The runtime owns transactions.
         _ => Authorization::Deny,
     }
 }
@@ -147,15 +110,7 @@ CREATE TABLE _perch_checkins (
   parent TEXT,
   manifest TEXT NOT NULL,
   message TEXT NOT NULL,
-  created_at INTEGER NOT NULL,
-  schema TEXT
-);
-CREATE TABLE _perch_migrations (
-  seq INTEGER PRIMARY KEY,
-  name TEXT NOT NULL,
-  sql TEXT NOT NULL,
-  checkin TEXT NOT NULL,
-  applied_at INTEGER NOT NULL
+  created_at INTEGER NOT NULL
 );
 CREATE TABLE _perch_kv (key TEXT PRIMARY KEY, value BLOB NOT NULL);
 CREATE TABLE _perch_alarms (
@@ -179,7 +134,6 @@ pub struct Checkin {
     pub manifest: Manifest,
     pub message: String,
     pub created_at: i64,
-    pub schema: Option<Schema>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -194,12 +148,6 @@ pub struct Column {
 
 /// Table name to columns, for every data table.
 pub type Schema = BTreeMap<String, Vec<Column>>;
-
-#[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct Migration {
-    pub name: String,
-    pub sql: String,
-}
 
 /// What a directory import did.
 #[derive(Serialize, Default, Debug, Clone)]
@@ -237,7 +185,7 @@ impl Store {
         let s = Self::open_raw(path)?;
         let v: Option<String> = s.meta("format_version")?;
         match v.as_deref() {
-            Some("2") => Ok(s),
+            Some("3") => Ok(s),
             Some(other) => bail!("this file is format version {other}; this perch reads only version {FORMAT_VERSION} (the format is still moving, and older files are not converted)"),
             None => bail!("{} is not a portable object file", path.display()),
         }
@@ -265,10 +213,9 @@ impl Store {
         name: &str,
         class: &str,
         files: &Files,
-        migrations: &[Migration],
         message: &str,
     ) -> Result<Store> {
-        Self::create_with(path, name, class, files, migrations, message, |_, _| Ok(()))
+        Self::create_with(path, name, class, files, message, |_, _| Ok(()))
     }
 
     /// As [`create`](Self::create), with `extra` adding more files to the first
@@ -278,7 +225,6 @@ impl Store {
         name: &str,
         class: &str,
         files: &Files,
-        migrations: &[Migration],
         message: &str,
         extra: impl FnOnce(&Store, &mut Manifest) -> Result<()>,
     ) -> Result<Store> {
@@ -288,18 +234,13 @@ impl Store {
         let s = Self::open_raw(path)?;
         s.conn.execute_batch(SCHEMA)?;
         s.set_meta("format_version", &FORMAT_VERSION.to_string())?;
-        s.set_meta("api_version", API_VERSION)?;
         s.set_meta("name", name)?;
         s.set_meta("class", class)?;
-        s.set_meta("main", DEFAULT_MAIN)?;
-        s.set_meta("created_at", &now_ms().to_string())?;
         s.conn.execute_batch("BEGIN IMMEDIATE")?;
         let r = (|| {
             let mut manifest = s.put_files(files)?;
             extra(&s, &mut manifest)?;
             let id = s.insert_checkin(None, &manifest, message)?;
-            s.apply_migrations(migrations, &id)?;
-            s.snapshot_schema(&id)?;
             s.set_meta("live_checkin", &id)?;
             Ok::<_, anyhow::Error>(())
         })();
@@ -422,7 +363,7 @@ impl Store {
         let id = self.resolve_checkin(id)?;
         self.with_mode(Mode::Privileged, |c| {
             c.query_row(
-                "SELECT id, parent, manifest, message, created_at, schema FROM _perch_checkins WHERE id=?",
+                "SELECT id, parent, manifest, message, created_at FROM _perch_checkins WHERE id=?",
                 [&id],
                 row_to_checkin,
             )
@@ -452,7 +393,7 @@ impl Store {
     pub fn checkins(&self) -> Result<Vec<Checkin>> {
         self.with_mode(Mode::Privileged, |c| {
             let mut st = c.prepare(
-                "SELECT id, parent, manifest, message, created_at, schema FROM _perch_checkins ORDER BY created_at DESC",
+                "SELECT id, parent, manifest, message, created_at FROM _perch_checkins ORDER BY created_at DESC",
             )?;
             let v = st
                 .query_map([], row_to_checkin)?
@@ -550,67 +491,6 @@ impl Store {
         Ok(stats)
     }
 
-    pub fn migrations(&self) -> Result<Vec<(i64, String, String, String, i64)>> {
-        self.with_mode(Mode::Privileged, |c| {
-            let mut st = c.prepare(
-                "SELECT seq, name, sql, checkin, applied_at FROM _perch_migrations ORDER BY seq",
-            )?;
-            let v = st
-                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))?
-                .collect::<rusqlite::Result<Vec<_>>>();
-            v
-        })
-        .map_err(Into::into)
-    }
-
-    /// Run migrations under the migration authorizer and record them. The
-    /// caller owns the surrounding transaction.
-    pub fn apply_migrations(&self, migrations: &[Migration], checkin: &str) -> Result<Vec<String>> {
-        let mut warnings = Vec::new();
-        for m in migrations {
-            if m.name.trim().is_empty() {
-                bail!("every migration needs a name");
-            }
-            if m.sql.to_ascii_lowercase().contains("autoincrement") {
-                bail!("migration {:?}: AUTOINCREMENT is not allowed in data tables; use UUIDv7 TEXT primary keys", m.name);
-            }
-            self.with_mode(Mode::Migration, |c| c.execute_batch(&m.sql))
-                .map_err(|e| anyhow!("migration {:?} failed: {e}", m.name))?;
-            self.with_mode(Mode::Privileged, |c| {
-                c.execute(
-                    "INSERT INTO _perch_migrations(name, sql, checkin, applied_at) VALUES (?, ?, ?, ?)",
-                    params![m.name, m.sql, checkin, now_ms()],
-                )
-            })?;
-        }
-        // Data-key rules: declared primary keys, no AUTOINCREMENT.
-        let schema = self.schema()?;
-        for (table, cols) in &schema {
-            let pk: Vec<&Column> = cols.iter().filter(|c| c.pk > 0).collect();
-            if pk.is_empty() {
-                bail!(
-                    "table {table} has no declared PRIMARY KEY; data tables need one (UUIDv7 text recommended)"
-                );
-            }
-            if pk.len() == 1 && pk[0].ty.eq_ignore_ascii_case("INTEGER") {
-                warnings.push(format!(
-                    "table {table}: INTEGER PRIMARY KEY auto-assigns rowids; two copies will collide. Prefer UUIDv7 TEXT keys."
-                ));
-            }
-        }
-        let has_seq: i64 = self.with_mode(Mode::Privileged, |c| {
-            c.query_row(
-                "SELECT count(*) FROM sqlite_master WHERE name='sqlite_sequence'",
-                [],
-                |r| r.get(0),
-            )
-        })?;
-        if has_seq > 0 {
-            bail!("AUTOINCREMENT is not allowed in data tables; use UUIDv7 TEXT primary keys");
-        }
-        Ok(warnings)
-    }
-
     /// The current shape of every data table.
     pub fn schema(&self) -> Result<Schema> {
         self.with_mode(Mode::Privileged, |c| {
@@ -638,14 +518,6 @@ impl Store {
             }
             Ok(out)
         })
-    }
-
-    pub fn snapshot_schema(&self, checkin: &str) -> Result<()> {
-        let s = serde_json::to_string(&self.schema()?)?;
-        self.with_mode(Mode::Privileged, |c| {
-            c.execute("UPDATE _perch_checkins SET schema=? WHERE id=?", [&s, checkin])
-        })?;
-        Ok(())
     }
 
     pub fn row_counts(&self) -> Result<BTreeMap<String, i64>> {
@@ -686,14 +558,12 @@ impl Store {
 
 fn row_to_checkin(r: &rusqlite::Row<'_>) -> rusqlite::Result<Checkin> {
     let manifest: String = r.get(2)?;
-    let schema: Option<String> = r.get(5)?;
     Ok(Checkin {
         id: r.get(0)?,
         parent: r.get(1)?,
         manifest: serde_json::from_str(&manifest).unwrap_or_default(),
         message: r.get(3)?,
         created_at: r.get(4)?,
-        schema: schema.and_then(|s| serde_json::from_str(&s).ok()),
     })
 }
 
@@ -706,31 +576,4 @@ pub fn validate_path(p: &str) -> Result<()> {
         bail!("invalid file path {p:?}: use relative paths like src/index.ts");
     }
     Ok(())
-}
-
-/// Does code written against `old` still fit the database shape `now`?
-/// Every table and column `old` knew must still exist, and no column added
-/// since may be NOT NULL without a default (old code's inserts would fail).
-pub fn schema_fits(old: &Schema, now: &Schema) -> std::result::Result<(), Vec<String>> {
-    let mut problems = Vec::new();
-    for (table, cols) in old {
-        let Some(now_cols) = now.get(table) else {
-            problems.push(format!("table {table} no longer exists"));
-            continue;
-        };
-        for c in cols {
-            if !now_cols.iter().any(|n| n.name == c.name) {
-                problems.push(format!("column {table}.{} no longer exists", c.name));
-            }
-        }
-        for n in now_cols {
-            if !cols.iter().any(|c| c.name == n.name) && n.notnull && n.default.is_none() && n.pk == 0 {
-                problems.push(format!(
-                    "column {table}.{} was added NOT NULL without a default; older code cannot insert",
-                    n.name
-                ));
-            }
-        }
-    }
-    if problems.is_empty() { Ok(()) } else { Err(problems) }
 }

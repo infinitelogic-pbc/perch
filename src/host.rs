@@ -1,14 +1,9 @@
 //! The object host: owns one object file and one engine, and runs events one
-//! at a time. Every event is one SQLite transaction. A session is attached for
-//! its duration only to count the rows it changed, which the caller sees in
-//! the result; nothing about the change is stored.
+//! at a time. Every event is one SQLite transaction.
 
-use std::collections::BTreeMap;
-use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Result, anyhow};
-use rusqlite::session::{ChangesetIter, Session};
 use serde::Serialize;
 use serde_json::{Value, json};
 use tokio::sync::{mpsc, oneshot};
@@ -40,13 +35,6 @@ pub enum Event {
     },
 }
 
-#[derive(Serialize, Default, Debug, Clone)]
-pub struct TableChanges {
-    pub inserts: u64,
-    pub updates: u64,
-    pub deletes: u64,
-}
-
 #[derive(Serialize, Debug, Default)]
 pub struct Outcome {
     pub ok: bool,
@@ -61,7 +49,8 @@ pub struct Outcome {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub result: Option<Value>,
     pub logs: Vec<LogLine>,
-    pub changes: BTreeMap<String, TableChanges>,
+    /// Rows written by the event, key-value entries and the alarm included.
+    pub rows_written: u64,
     pub checkin: String,
     #[serde(skip)]
     pub alarm_missing: bool,
@@ -87,32 +76,6 @@ pub struct Host {
     tests: Vec<String>,
     /// The next event is a read: writes are refused and the transaction is rolled back.
     read_only: bool,
-}
-
-/// Count rows touched per table in a changeset.
-pub fn summarize_changeset(bytes: &[u8]) -> BTreeMap<String, TableChanges> {
-    use fallible_streaming_iterator::FallibleStreamingIterator;
-    let mut out: BTreeMap<String, TableChanges> = BTreeMap::new();
-    if bytes.is_empty() {
-        return out;
-    }
-    let mut reader: &[u8] = bytes;
-    let input: &mut dyn Read = &mut reader;
-    let Ok(mut it) = ChangesetIter::start_strm(&input) else {
-        return out;
-    };
-    while let Ok(Some(item)) = it.next() {
-        if let Ok(op) = item.op() {
-            let e = out.entry(op.table_name().to_string()).or_default();
-            match op.code() {
-                rusqlite::hooks::Action::SQLITE_INSERT => e.inserts += 1,
-                rusqlite::hooks::Action::SQLITE_UPDATE => e.updates += 1,
-                rusqlite::hooks::Action::SQLITE_DELETE => e.deletes += 1,
-                _ => {}
-            }
-        }
-    }
-    out
 }
 
 impl Host {
@@ -147,21 +110,22 @@ impl Host {
         self.loaded = None;
         // Code only: static files under public/ are never loaded to run the class.
         let files = self.store.code_files_at(&live)?;
-        let main = self.store.meta("main")?.unwrap_or_else(|| DEFAULT_MAIN.to_string());
         let class = self.store.meta_req("class")?;
         let name = self.store.meta_req("name")?;
         let engine = Engine::load(
             self.store.conn.clone(),
             self.store.mode.clone(),
             files,
-            &main,
+            DEFAULT_MAIN,
             self.echo_logs,
             &self.tests,
         )
         .await?;
         self.engine = Some(engine);
         let ev = json!({ "kind": "init", "className": class, "name": name, "env": {} });
-        let (r, _cs) = self.run_in_txn(ev, None).await?;
+        // A constructor that throws leaves nothing behind: its writes (a schema
+        // step, say) are rolled back with it.
+        let (r, _) = self.run_in_txn(ev, None, true).await?;
         let logs = self.engine.as_mut().map(|e| e.take_logs()).unwrap_or_default();
         if let Err(e) = r {
             self.engine = None;
@@ -177,7 +141,8 @@ impl Host {
         &mut self,
         ev: Value,
         body: Option<Vec<u8>>,
-    ) -> Result<(std::result::Result<Dispatched, String>, Vec<u8>)> {
+        rollback_on_throw: bool,
+    ) -> Result<(std::result::Result<Dispatched, String>, u64)> {
         let conn = self.store.conn.clone();
         let mode = self.store.mode.clone();
         let read_only = self.read_only;
@@ -185,27 +150,22 @@ impl Host {
         engine.set_read_only(read_only);
         mode.set(Mode::Privileged);
         conn.execute_batch(if read_only { "BEGIN" } else { "BEGIN IMMEDIATE" })?;
+        let before = conn.total_changes();
         let result = async {
-            let mut session = Session::new(&conn)?;
-            session.table_filter(Some(|t: &str| !t.starts_with("_perch_") || t == "_perch_kv"));
-            session.attach::<&str>(None)?;
             mode.set(if read_only { Mode::ReadOnly } else { Mode::Sandbox });
             let r = engine.dispatch(ev, body).await;
             mode.set(Mode::Privileged);
             engine.set_read_only(false);
-            let mut cs = Vec::new();
-            session.changeset_strm(&mut cs)?;
-            drop(session);
             let r = r?;
-            Ok::<_, anyhow::Error>((r, cs))
+            Ok::<_, anyhow::Error>((r, conn.total_changes() - before))
         }
         .await;
         mode.set(Mode::Privileged);
         match result {
-            Ok(_) if read_only => {
+            Ok((r, _)) if read_only || (rollback_on_throw && r.is_err()) => {
                 // A read leaves nothing behind, whatever the handler did.
                 conn.execute_batch("ROLLBACK")?;
-                result.map(|(r, _)| (r, Vec::new()))
+                Ok((r, 0))
             }
             Ok(v) => {
                 conn.execute_batch("COMMIT")?;
@@ -230,9 +190,6 @@ impl Host {
             return Ok(None);
         }
         let Ok(u) = url::Url::parse(url) else { return Ok(None) };
-        if u.path().starts_with("/.perch/") {
-            return Ok(None);
-        }
         let checkin = self.store.live_checkin()?;
         let manifest = {
             let mut cached = self.asset_index.borrow_mut();
@@ -336,12 +293,11 @@ impl Host {
                 None,
             ),
         };
-        let (r, cs) = self.run_in_txn(json, body).await?;
+        let (r, rows_written) = self.run_in_txn(json, body, false).await?;
         let mut logs = std::mem::take(&mut self.pending_logs);
         if let Some(e) = self.engine.as_mut() {
             logs.extend(e.take_logs());
         }
-        let changes = summarize_changeset(&cs);
         let alarm_touched = self.engine.as_mut().map(|e| e.alarm_touched()).unwrap_or(false);
         Ok(match r {
             Ok(d) => {
@@ -359,7 +315,7 @@ impl Host {
                     body: d.body,
                     result: d.meta.get("result").or_else(|| d.meta.get("tests")).cloned(),
                     logs,
-                    changes,
+                    rows_written,
                     checkin,
                     alarm_missing: d.meta.get("missing").and_then(|m| m.as_bool()).unwrap_or(false),
                     alarm_touched,
@@ -374,7 +330,7 @@ impl Host {
                 body: vec![],
                 result: None,
                 logs,
-                changes,
+                rows_written,
                 checkin,
                 alarm_missing: false,
                 alarm_touched,
@@ -402,7 +358,7 @@ impl Host {
                 body: vec![],
                 result: None,
                 logs: vec![],
-                changes: BTreeMap::new(),
+                rows_written: 0,
                 checkin: String::new(),
                 alarm_missing: false,
                 alarm_touched: false,
@@ -477,7 +433,7 @@ pub fn spawn(path: PathBuf, fire_alarms: bool, echo_logs: bool) -> Result<HostHa
                         if fire_alarms {
                             match host.fire_due_alarm().await {
                                 Ok(Some(o)) if echo_logs => {
-                                    if o.ok { eprintln!("alarm fired: {}", serde_json::to_string(&o.changes).unwrap_or_default()); }
+                                    if o.ok { eprintln!("alarm fired: {} rows written", o.rows_written); }
                                     else { eprintln!("alarm failed: {}", o.error.unwrap_or_default()); }
                                 }
                                 Err(e) => eprintln!("alarm error: {e}"),

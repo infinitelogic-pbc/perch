@@ -17,13 +17,12 @@ clap = { version = "4", features = ["derive"] }
 deno_ast = { version = "0.53", features = ["transpiling"] }
 deno_core = "0.413"
 deno_error = "0.7"
-fallible-streaming-iterator = "0.1"
+fallible-iterator = "0.3"
 hex = "0.4"
-rusqlite = { version = "0.43", features = ["bundled", "session", "hooks", "backup", "functions"] }
+rusqlite = { version = "0.43", features = ["bundled", "hooks", "backup", "functions"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
-similar = "3.2.1"
 tokio = { version = "1", features = ["full"] }
 url = "2"
 uuid = { version = "1", features = ["v7"] }

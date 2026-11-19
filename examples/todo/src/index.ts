@@ -1,6 +1,7 @@
 import { DurableObject } from "cloudflare:workers";
 import { uuidv7 } from "./uuid";
 import statsPage from "./stats.html";
+import { migrate } from "./schema";
 
 type TodoRow = { id: string; title: string; done: number; created_at: number; done_at: number | null };
 
@@ -10,6 +11,7 @@ const DAY = 24 * 60 * 60 * 1000;
 export class Todo extends DurableObject {
   constructor(ctx: DurableObjectState, env: unknown) {
     super(ctx, env);
+    migrate(ctx.storage);
     ctx.blockConcurrencyWhile(async () => {
       if ((await ctx.storage.getAlarm()) == null) await ctx.storage.setAlarm(nextMidnight());
     });
@@ -29,6 +31,14 @@ export class Todo extends DurableObject {
       };
       const html = statsPage.replace(/\{\{(\w+)\}\}/g, (_: string, k: string) => vars[k] ?? "");
       return new Response(html, { headers: { "content-type": "text/html; charset=utf-8" } });
+    }
+    // Methods are not reachable over HTTP; what a page or a script needs is a route.
+    if (url.pathname === "/api/stats" && request.method === "GET") return Response.json(await this.stats());
+    if (url.pathname === "/api/cleanup" && request.method === "POST") {
+      const body = (await request.json()) as { retentionMs?: number; inMs?: number };
+      if (body.retentionMs != null) await this.setRetention(body.retentionMs);
+      const at = body.inMs != null ? await this.scheduleCleanup(body.inMs) : null;
+      return Response.json({ at });
     }
     if (parts[0] !== "todos") return Response.json({ error: "not found" }, { status: 404 });
     const id = parts[1];
